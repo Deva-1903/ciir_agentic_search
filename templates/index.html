@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AgenticSearch</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+
+<div class="app">
+
+  <!-- ── Header ─────────────────────────────────────────────────────────── -->
+  <header class="header">
+    <h1 class="header__title">AgenticSearch</h1>
+    <p class="header__subtitle">
+      Entity discovery with per-cell source provenance · powered by Brave + LLM
+    </p>
+  </header>
+
+  <!-- ── Search form ────────────────────────────────────────────────────── -->
+  <section class="search-section">
+    <form id="search-form" class="search-form" autocomplete="off">
+      <input
+        id="query-input"
+        type="text"
+        class="search-input"
+        placeholder='Try "AI startups in healthcare" or "open source database tools"'
+        required
+        autofocus
+      />
+      <button type="submit" id="search-btn" class="btn btn--primary">
+        Run Search
+      </button>
+    </form>
+
+    <!-- example queries -->
+    <div class="examples">
+      <span class="examples__label">Examples:</span>
+      <button class="example-chip" data-q="AI startups in healthcare">AI startups in healthcare</button>
+      <button class="example-chip" data-q="top pizza places in Brooklyn">top pizza places in Brooklyn</button>
+      <button class="example-chip" data-q="open source database tools">open source database tools</button>
+      <button class="example-chip" data-q="climate tech startups series A">climate tech startups series A</button>
+    </div>
+  </section>
+
+  <!-- ── Status / loading ───────────────────────────────────────────────── -->
+  <div id="status-section" class="status-section hidden">
+    <div class="status-card">
+      <div class="spinner"></div>
+      <span id="phase-label" class="phase-label">Starting…</span>
+    </div>
+  </div>
+
+  <!-- ── Error banner ───────────────────────────────────────────────────── -->
+  <div id="error-banner" class="error-banner hidden">
+    <strong>Error:</strong> <span id="error-msg"></span>
+  </div>
+
+  <!-- ── Results ────────────────────────────────────────────────────────── -->
+  <section id="results-section" class="results-section hidden">
+
+    <!-- Metadata bar -->
+    <div class="meta-bar">
+      <div class="meta-bar__left">
+        <span class="tag tag--type" id="meta-entity-type"></span>
+        <span class="meta-text" id="meta-summary"></span>
+      </div>
+      <div class="meta-bar__right">
+        <button id="btn-export-json" class="btn btn--sm btn--outline">↓ JSON</button>
+        <button id="btn-export-csv"  class="btn btn--sm btn--outline">↓ CSV</button>
+      </div>
+    </div>
+
+    <!-- Search angles accordion -->
+    <details class="angles-details">
+      <summary class="angles-summary">Search angles used</summary>
+      <ul id="angles-list" class="angles-list"></ul>
+    </details>
+
+    <!-- Results table -->
+    <div class="table-scroll">
+      <table id="results-table" class="results-table">
+        <thead id="table-head"></thead>
+        <tbody id="table-body"></tbody>
+      </table>
+    </div>
+
+    <!-- Run metadata -->
+    <div class="run-meta" id="run-meta"></div>
+  </section>
+
+</div><!-- .app -->
+
+<!-- ── Evidence modal ─────────────────────────────────────────────────────── -->
+<div id="modal-overlay" class="modal-overlay hidden" role="dialog" aria-modal="true">
+  <div class="modal">
+    <button class="modal__close" id="modal-close" aria-label="Close">✕</button>
+    <h2 class="modal__title" id="modal-col-label"></h2>
+    <div class="modal__value-row">
+      <span class="modal__value" id="modal-value"></span>
+      <span class="modal__conf" id="modal-conf"></span>
+    </div>
+    <hr class="modal__divider" />
+    <div class="modal__field">
+      <span class="modal__field-label">Evidence</span>
+      <blockquote class="modal__snippet" id="modal-snippet"></blockquote>
+    </div>
+    <div class="modal__field">
+      <span class="modal__field-label">Source</span>
+      <a class="modal__source-url" id="modal-source-url" target="_blank" rel="noopener noreferrer"></a>
+      <span class="modal__source-title" id="modal-source-title"></span>
+    </div>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
