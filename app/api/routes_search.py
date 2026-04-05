@@ -25,12 +25,15 @@ from app.models.schema import (
     SearchRequest,
     SearchResponse,
 )
+from app.core.config import get_settings
 from app.services.brave_search import run_brave_search
+from app.services.cell_verifier import verify_rows_cells
 from app.services.extractor import extract_from_pages
 from app.services.gap_fill import run_gap_fill
 from app.services.merger import merge_entities
 from app.services.planner import plan_schema
 from app.services.ranker import prune_rows, rank_rows
+from app.services.reranker import rerank_pages
 from app.services.scraper import scrape_pages
 from app.services.verifier import verify_rows
 
@@ -54,8 +57,8 @@ async def _run_pipeline(job_id: str, query: str) -> None:
         # 1. Plan schema
         await _phase("planning")
         plan: PlannerOutput = await plan_schema(query)
-        log.info("Plan: entity_type=%r  columns=%s  angles=%d",
-                 plan.entity_type, plan.columns, len(plan.search_angles))
+        log.info("Plan: entity_type=%r  columns=%s  facets=%d",
+                 plan.entity_type, plan.columns, len(plan.facets))
 
         # 2. Search
         await _phase("searching")
@@ -72,9 +75,18 @@ async def _run_pipeline(job_id: str, query: str) -> None:
         if pages_scraped == 0:
             raise RuntimeError("No pages could be scraped. Check network / Brave API.")
 
+        # 3.5 Rerank: focus extraction budget on top-K query-relevant pages
+        settings = get_settings()
+        rerank_info: dict = {"scorer": None, "pages_after": pages_scraped}
+        if settings.rerank_enabled and pages_scraped > settings.rerank_top_k:
+            await _phase("reranking")
+            pages, rerank_info = await rerank_pages(query, pages, settings.rerank_top_k)
+        else:
+            rerank_info = {"scorer": None, "pages_after": pages_scraped}
+
         # 4. Extract
         await _phase("extracting")
-        log.info("Extracting from %d pages (this is the slow step)…", pages_scraped)
+        log.info("Extracting from %d pages (this is the slow step)…", len(pages))
         drafts = await extract_from_pages(query, plan, pages)
         entities_extracted = len(drafts)
         log.info("Extraction done: %d candidate entities", entities_extracted)
@@ -86,6 +98,10 @@ async def _run_pipeline(job_id: str, query: str) -> None:
         entities_after_merge = len(rows)
         log.info("Merge done: %d canonical rows", entities_after_merge)
 
+        # 5.5 Cell-level verification (name-alignment penalty)
+        if settings.cell_verifier_enabled:
+            rows = verify_rows_cells(rows)
+
         # 6. Rank
         log.info("Ranking rows…")
         rows = rank_rows(rows, plan)
@@ -94,6 +110,9 @@ async def _run_pipeline(job_id: str, query: str) -> None:
         await _phase("gap_filling")
         rows, gap_fill_used = await run_gap_fill(rows, plan, query)
         log.info("Gap-fill done: used=%s", gap_fill_used)
+        # Re-run cell verification because gap-fill adds new cells.
+        if settings.cell_verifier_enabled:
+            rows = verify_rows_cells(rows)
 
         await _phase("verifying")
         rows = verify_rows(rows, plan, query)
@@ -111,8 +130,11 @@ async def _run_pipeline(job_id: str, query: str) -> None:
             rows=rows,
             metadata=SearchMetadata(
                 search_angles=plan.search_angles,
+                facets=plan.facets,
                 urls_considered=urls_considered,
                 pages_scraped=pages_scraped,
+                pages_after_rerank=rerank_info.get("pages_after"),
+                rerank_scorer=rerank_info.get("scorer"),
                 entities_extracted=entities_extracted,
                 entities_after_merge=entities_after_merge,
                 gap_fill_used=gap_fill_used,

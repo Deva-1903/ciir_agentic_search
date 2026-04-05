@@ -1,119 +1,251 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>AgenticSearch</title>
-  <link rel="stylesheet" href="/static/style.css" />
-</head>
-<body>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AgenticSearch</title>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <div class="app">
+      <!-- ── Hero / top section ─────────────────────────────────────────────── -->
+      <header class="header">
+        <h1 class="header__title">AgenticSearch</h1>
+        <p class="header__subtitle">
+          Discover structured entities from the web with per-cell evidence
+        </p>
+      </header>
 
-<div class="app">
+      <!-- ── Search form ────────────────────────────────────────────────────── -->
+      <section class="search-section">
+        <form id="search-form" class="search-form" autocomplete="off">
+          <input
+            id="query-input"
+            type="text"
+            class="search-input"
+            placeholder='Try "AI startups in healthcare" or "open source database tools"'
+            required
+            autofocus
+          />
+          <button type="submit" id="search-btn" class="btn btn--primary">
+            Run Search
+          </button>
+        </form>
 
-  <!-- ── Header ─────────────────────────────────────────────────────────── -->
-  <header class="header">
-    <h1 class="header__title">AgenticSearch</h1>
-    <p class="header__subtitle">
-      Entity discovery with per-cell source provenance · powered by Brave + LLM
-    </p>
-  </header>
+        <div class="examples">
+          <span class="examples__label">Examples:</span>
+          <button class="example-chip" data-q="AI startups in healthcare">
+            AI startups in healthcare
+          </button>
+          <button class="example-chip" data-q="top pizza places in Brooklyn">
+            top pizza places in Brooklyn
+          </button>
+          <button class="example-chip" data-q="open source database tools">
+            open source database tools
+          </button>
+        </div>
 
-  <!-- ── Search form ────────────────────────────────────────────────────── -->
-  <section class="search-section">
-    <form id="search-form" class="search-form" autocomplete="off">
-      <input
-        id="query-input"
-        type="text"
-        class="search-input"
-        placeholder='Try "AI startups in healthcare" or "open source database tools"'
-        required
-        autofocus
-      />
-      <button type="submit" id="search-btn" class="btn btn--primary">
-        Run Search
-      </button>
-    </form>
+        <p class="trust-line">
+          Every cell links to a source URL, evidence snippet, and confidence
+          score.
+        </p>
+      </section>
 
-    <!-- example queries -->
-    <div class="examples">
-      <span class="examples__label">Examples:</span>
-      <button class="example-chip" data-q="AI startups in healthcare">AI startups in healthcare</button>
-      <button class="example-chip" data-q="top pizza places in Brooklyn">top pizza places in Brooklyn</button>
-      <button class="example-chip" data-q="open source database tools">open source database tools</button>
-      <button class="example-chip" data-q="climate tech startups series A">climate tech startups series A</button>
-    </div>
-  </section>
-
-  <!-- ── Status / loading ───────────────────────────────────────────────── -->
-  <div id="status-section" class="status-section hidden">
-    <div class="status-card">
-      <div class="spinner"></div>
-      <span id="phase-label" class="phase-label">Starting…</span>
-    </div>
-  </div>
-
-  <!-- ── Error banner ───────────────────────────────────────────────────── -->
-  <div id="error-banner" class="error-banner hidden">
-    <strong>Error:</strong> <span id="error-msg"></span>
-  </div>
-
-  <!-- ── Results ────────────────────────────────────────────────────────── -->
-  <section id="results-section" class="results-section hidden">
-
-    <!-- Metadata bar -->
-    <div class="meta-bar">
-      <div class="meta-bar__left">
-        <span class="tag tag--type" id="meta-entity-type"></span>
-        <span class="meta-text" id="meta-summary"></span>
+      <!-- ── Phase / progress tracker ───────────────────────────────────────── -->
+      <div id="pipeline-tracker" class="pipeline-tracker hidden">
+        <div class="pipeline-stages">
+          <div class="stage" data-stage="planning">
+            <span class="stage-dot"></span
+            ><span class="stage-label">Planning</span>
+          </div>
+          <div class="stage" data-stage="searching">
+            <span class="stage-dot"></span
+            ><span class="stage-label">Searching</span>
+          </div>
+          <div class="stage" data-stage="scraping">
+            <span class="stage-dot"></span
+            ><span class="stage-label">Scraping</span>
+          </div>
+          <div class="stage" data-stage="reranking">
+            <span class="stage-dot"></span
+            ><span class="stage-label">Reranking</span>
+          </div>
+          <div class="stage" data-stage="extracting">
+            <span class="stage-dot"></span
+            ><span class="stage-label">Extracting</span>
+          </div>
+          <div class="stage" data-stage="merging">
+            <span class="stage-dot"></span
+            ><span class="stage-label">Merging</span>
+          </div>
+          <div class="stage" data-stage="gap_filling">
+            <span class="stage-dot"></span
+            ><span class="stage-label">Gap-fill</span>
+          </div>
+          <div class="stage" data-stage="verifying">
+            <span class="stage-dot"></span
+            ><span class="stage-label">Verifying</span>
+          </div>
+        </div>
+        <div class="pipeline-status">
+          <div class="spinner"></div>
+          <span id="phase-label" class="phase-label">Starting…</span>
+          <span id="elapsed-label" class="elapsed-label"></span>
+        </div>
       </div>
-      <div class="meta-bar__right">
-        <button id="btn-export-json" class="btn btn--sm btn--outline">↓ JSON</button>
-        <button id="btn-export-csv"  class="btn btn--sm btn--outline">↓ CSV</button>
+
+      <!-- ── Error banner ───────────────────────────────────────────────────── -->
+      <div id="error-banner" class="error-banner hidden">
+        <strong>Error:</strong> <span id="error-msg"></span>
+        <p class="error-hint">
+          Try a more specific query, or check server logs for details.
+        </p>
+      </div>
+
+      <!-- ── No-results banner ──────────────────────────────────────────────── -->
+      <div id="no-results-banner" class="no-results-banner hidden">
+        <strong>No entities found.</strong>
+        <p>
+          The system could not extract confident entities for this query. Try a
+          more specific topic, e.g. "best pizza restaurants in Manhattan" rather
+          than "food".
+        </p>
+      </div>
+
+      <!-- ── Results ────────────────────────────────────────────────────────── -->
+      <section id="results-section" class="results-section hidden">
+        <!-- Results summary strip -->
+        <div class="summary-strip">
+          <div class="summary-strip__items">
+            <span class="summary-item" id="sum-entity-type"></span>
+            <span class="summary-item"
+              ><strong id="sum-rows">0</strong> rows</span
+            >
+            <span class="summary-item"
+              ><strong id="sum-sources">0</strong> URLs inspected</span
+            >
+            <span class="summary-item"
+              ><strong id="sum-scraped">0</strong> pages scraped</span
+            >
+            <span class="summary-item"
+              ><strong id="sum-extracted">0</strong> pages extracted</span
+            >
+            <span class="summary-item" id="sum-gapfill"></span>
+            <span class="summary-item" id="sum-duration"></span>
+          </div>
+          <div class="summary-strip__actions">
+            <button id="btn-export-json" class="btn btn--sm btn--outline">
+              ↓ JSON
+            </button>
+            <button id="btn-export-csv" class="btn btn--sm btn--outline">
+              ↓ CSV
+            </button>
+          </div>
+        </div>
+
+        <!-- Collapsible panels row -->
+        <div class="panels-row">
+          <!-- Retrieval Plan -->
+          <details class="panel" id="panel-retrieval">
+            <summary class="panel__header">Retrieval Plan</summary>
+            <div class="panel__body" id="retrieval-plan-body"></div>
+          </details>
+
+          <!-- Quality Controls -->
+          <details class="panel" id="panel-quality">
+            <summary class="panel__header">Quality Controls Applied</summary>
+            <div class="panel__body" id="quality-controls-body"></div>
+          </details>
+
+          <!-- Run Stats -->
+          <details class="panel" id="panel-stats">
+            <summary class="panel__header">Run Stats</summary>
+            <div class="panel__body" id="run-stats-body"></div>
+          </details>
+        </div>
+
+        <!-- Results table -->
+        <div class="table-scroll">
+          <table id="results-table" class="results-table">
+            <thead id="table-head"></thead>
+            <tbody id="table-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- ── Empty state ────────────────────────────────────────────────────── -->
+      <section id="empty-state" class="empty-state">
+        <div class="empty-state__content">
+          <h2>How it works</h2>
+          <ol class="how-it-works">
+            <li>
+              <strong>Plan</strong> — LLM infers entity type, schema columns,
+              and typed retrieval facets
+            </li>
+            <li>
+              <strong>Search &amp; Scrape</strong> — Multi-angle web search via
+              Brave, async scraping with caching
+            </li>
+            <li>
+              <strong>Rerank</strong> — Cross-encoder selects the most
+              query-relevant pages for extraction
+            </li>
+            <li>
+              <strong>Extract</strong> — LLM extracts structured entities with
+              per-cell evidence and confidence
+            </li>
+            <li>
+              <strong>Merge &amp; Verify</strong> — Fuzzy dedup, cell-level
+              verification, source-quality scoring, gap-fill
+            </li>
+            <li>
+              <strong>Rank</strong> — 6-component weighted ranker: completeness,
+              confidence, source quality, diversity, and more
+            </li>
+          </ol>
+        </div>
+      </section>
+    </div>
+    <!-- .app -->
+
+    <!-- ── Evidence modal ─────────────────────────────────────────────────────── -->
+    <div
+      id="modal-overlay"
+      class="modal-overlay hidden"
+      role="dialog"
+      aria-modal="true"
+    >
+      <div class="modal">
+        <button class="modal__close" id="modal-close" aria-label="Close">
+          ✕
+        </button>
+        <div class="modal__header-row">
+          <span class="modal__col-label" id="modal-col-label"></span>
+          <span class="modal__source-badge" id="modal-source-badge"></span>
+        </div>
+        <div class="modal__value-row">
+          <span class="modal__value" id="modal-value"></span>
+          <span class="modal__conf" id="modal-conf"></span>
+        </div>
+        <hr class="modal__divider" />
+        <div class="modal__field">
+          <span class="modal__field-label">Evidence snippet</span>
+          <blockquote class="modal__snippet" id="modal-snippet"></blockquote>
+        </div>
+        <div class="modal__field">
+          <span class="modal__field-label">Source</span>
+          <a
+            class="modal__source-url"
+            id="modal-source-url"
+            target="_blank"
+            rel="noopener noreferrer"
+          ></a>
+          <span class="modal__source-title" id="modal-source-title"></span>
+        </div>
+        <div class="modal__flags" id="modal-flags"></div>
       </div>
     </div>
 
-    <!-- Search angles accordion -->
-    <details class="angles-details">
-      <summary class="angles-summary">Search angles used</summary>
-      <ul id="angles-list" class="angles-list"></ul>
-    </details>
-
-    <!-- Results table -->
-    <div class="table-scroll">
-      <table id="results-table" class="results-table">
-        <thead id="table-head"></thead>
-        <tbody id="table-body"></tbody>
-      </table>
-    </div>
-
-    <!-- Run metadata -->
-    <div class="run-meta" id="run-meta"></div>
-  </section>
-
-</div><!-- .app -->
-
-<!-- ── Evidence modal ─────────────────────────────────────────────────────── -->
-<div id="modal-overlay" class="modal-overlay hidden" role="dialog" aria-modal="true">
-  <div class="modal">
-    <button class="modal__close" id="modal-close" aria-label="Close">✕</button>
-    <h2 class="modal__title" id="modal-col-label"></h2>
-    <div class="modal__value-row">
-      <span class="modal__value" id="modal-value"></span>
-      <span class="modal__conf" id="modal-conf"></span>
-    </div>
-    <hr class="modal__divider" />
-    <div class="modal__field">
-      <span class="modal__field-label">Evidence</span>
-      <blockquote class="modal__snippet" id="modal-snippet"></blockquote>
-    </div>
-    <div class="modal__field">
-      <span class="modal__field-label">Source</span>
-      <a class="modal__source-url" id="modal-source-url" target="_blank" rel="noopener noreferrer"></a>
-      <span class="modal__source-title" id="modal-source-title"></span>
-    </div>
-  </div>
-</div>
-
-<script src="/static/app.js"></script>
-</body>
+    <script src="/static/app.js"></script>
+  </body>
 </html>

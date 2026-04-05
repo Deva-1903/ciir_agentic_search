@@ -1,94 +1,243 @@
 /* AgenticSearch frontend — vanilla JS, no dependencies */
 
-'use strict';
+"use strict";
 
 // ── State ──────────────────────────────────────────────────────────────────
 let currentJobId = null;
-let pollTimer    = null;
+let pollTimer = null;
+let pipelineStartTime = null;
+let elapsedTimer = null;
 
 // ── DOM refs ───────────────────────────────────────────────────────────────
-const form         = document.getElementById('search-form');
-const queryInput   = document.getElementById('query-input');
-const searchBtn    = document.getElementById('search-btn');
-const statusSec    = document.getElementById('status-section');
-const phaseLabel   = document.getElementById('phase-label');
-const errorBanner  = document.getElementById('error-banner');
-const errorMsg     = document.getElementById('error-msg');
-const resultsSec   = document.getElementById('results-section');
-const tableHead    = document.getElementById('table-head');
-const tableBody    = document.getElementById('table-body');
-const metaEntityType = document.getElementById('meta-entity-type');
-const metaSummary  = document.getElementById('meta-summary');
-const anglesList   = document.getElementById('angles-list');
-const runMeta      = document.getElementById('run-meta');
-const exportJson   = document.getElementById('btn-export-json');
-const exportCsv    = document.getElementById('btn-export-csv');
+const form = document.getElementById("search-form");
+const queryInput = document.getElementById("query-input");
+const searchBtn = document.getElementById("search-btn");
+const tracker = document.getElementById("pipeline-tracker");
+const phaseLabel = document.getElementById("phase-label");
+const elapsedLabel = document.getElementById("elapsed-label");
+const errorBanner = document.getElementById("error-banner");
+const errorMsg = document.getElementById("error-msg");
+const noResultsBanner = document.getElementById("no-results-banner");
+const resultsSec = document.getElementById("results-section");
+const emptyState = document.getElementById("empty-state");
+const tableHead = document.getElementById("table-head");
+const tableBody = document.getElementById("table-body");
+const exportJson = document.getElementById("btn-export-json");
+const exportCsv = document.getElementById("btn-export-csv");
+
+// Summary strip
+const sumEntityType = document.getElementById("sum-entity-type");
+const sumRows = document.getElementById("sum-rows");
+const sumSources = document.getElementById("sum-sources");
+const sumScraped = document.getElementById("sum-scraped");
+const sumExtracted = document.getElementById("sum-extracted");
+const sumGapfill = document.getElementById("sum-gapfill");
+const sumDuration = document.getElementById("sum-duration");
+
+// Panels
+const retrievalBody = document.getElementById("retrieval-plan-body");
+const qualityBody = document.getElementById("quality-controls-body");
+const statsBody = document.getElementById("run-stats-body");
 
 // Modal
-const modalOverlay   = document.getElementById('modal-overlay');
-const modalClose     = document.getElementById('modal-close');
-const modalColLabel  = document.getElementById('modal-col-label');
-const modalValue     = document.getElementById('modal-value');
-const modalConf      = document.getElementById('modal-conf');
-const modalSnippet   = document.getElementById('modal-snippet');
-const modalSourceUrl = document.getElementById('modal-source-url');
-const modalSourceTitle = document.getElementById('modal-source-title');
+const modalOverlay = document.getElementById("modal-overlay");
+const modalClose = document.getElementById("modal-close");
+const modalColLabel = document.getElementById("modal-col-label");
+const modalValue = document.getElementById("modal-value");
+const modalConf = document.getElementById("modal-conf");
+const modalSnippet = document.getElementById("modal-snippet");
+const modalSourceUrl = document.getElementById("modal-source-url");
+const modalSourceTitle = document.getElementById("modal-source-title");
+const modalSourceBadge = document.getElementById("modal-source-badge");
+const modalFlags = document.getElementById("modal-flags");
 
 // ── Helpers ────────────────────────────────────────────────────────────────
-function show(el)  { el.classList.remove('hidden'); }
-function hide(el)  { el.classList.add('hidden'); }
+function show(el) {
+  el.classList.remove("hidden");
+}
+function hide(el) {
+  el.classList.add("hidden");
+}
 
 function showError(msg) {
   errorMsg.textContent = msg;
   show(errorBanner);
 }
-
-function clearError() { hide(errorBanner); }
-
-function setPhase(raw) {
-  const labels = {
-    queued:      'Queued…',
-    pending:     'Starting pipeline…',
-    planning:    'Planning schema…',
-    searching:   'Searching the web…',
-    scraping:    'Scraping pages…',
-    extracting:  'Extracting entities…',
-    merging:     'Merging & deduplicating…',
-    gap_filling: 'Gap-fill enrichment…',
-    done:        'Done!',
-  };
-  phaseLabel.textContent = labels[raw] || raw || 'Working…';
-}
-
-function confClass(conf) {
-  if (conf >= 0.8) return 'conf-high';
-  if (conf >= 0.5) return 'conf-medium';
-  return 'conf-low';
+function clearError() {
+  hide(errorBanner);
+  hide(noResultsBanner);
 }
 
 function humanColumn(col) {
-  return col.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+  return col.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+function confClass(conf) {
+  if (conf >= 0.8) return "conf-high";
+  if (conf >= 0.5) return "conf-medium";
+  return "conf-low";
+}
+
+function confLabel(conf) {
+  if (conf >= 0.8) return "high";
+  if (conf >= 0.5) return "medium";
+  return "low";
+}
+
+// ── Source type classification (simplified frontend mirror of source_quality.py) ─
+const _EDITORIAL = new Set([
+  "eater.com",
+  "foodandwine.com",
+  "grubstreet.com",
+  "michelin.com",
+  "newyorker.com",
+  "nytimes.com",
+  "seriouseats.com",
+  "tastingtable.com",
+  "theinfatuation.com",
+  "thrillist.com",
+  "timeout.com",
+  "vogue.com",
+  "techcrunch.com",
+  "wired.com",
+  "arstechnica.com",
+  "theverge.com",
+  "zdnet.com",
+  "cnet.com",
+]);
+const _DIRECTORY = new Set([
+  "yelp.com",
+  "tripadvisor.com",
+  "opentable.com",
+  "g2.com",
+  "capterra.com",
+  "trustpilot.com",
+]);
+const _MARKETPLACE = new Set([
+  "doordash.com",
+  "grubhub.com",
+  "postmates.com",
+  "seamless.com",
+  "ubereats.com",
+  "amazon.com",
+]);
+
+function extractDomain(url) {
+  try {
+    const h = new URL(url).hostname.toLowerCase();
+    return h.startsWith("www.") ? h.slice(4) : h;
+  } catch {
+    return "";
+  }
+}
+
+function classifySource(url) {
+  const d = extractDomain(url);
+  if (_EDITORIAL.has(d)) return "editorial";
+  if (_DIRECTORY.has(d)) return "directory";
+  if (_MARKETPLACE.has(d)) return "marketplace";
+  return "unknown";
+}
+
+function classifySourceForRow(cells, entityWebsite) {
+  const types = new Set();
+  for (const cell of Object.values(cells)) {
+    if (!cell || !cell.source_url) continue;
+    const d = extractDomain(cell.source_url);
+    if (entityWebsite && extractDomain(entityWebsite) === d) {
+      types.add("official");
+    } else {
+      types.add(classifySource(cell.source_url));
+    }
+  }
+  return types;
+}
+
+// ── Pipeline phase tracking ────────────────────────────────────────────────
+const STAGES = [
+  "planning",
+  "searching",
+  "scraping",
+  "reranking",
+  "extracting",
+  "merging",
+  "gap_filling",
+  "verifying",
+];
+
+const PHASE_LABELS = {
+  queued: "Queued…",
+  pending: "Starting pipeline…",
+  planning: "Planning schema…",
+  searching: "Searching the web…",
+  scraping: "Scraping pages…",
+  reranking: "Reranking pages…",
+  extracting: "Extracting entities…",
+  merging: "Merging & deduplicating…",
+  gap_filling: "Gap-fill enrichment…",
+  verifying: "Verifying quality…",
+  done: "Done!",
+};
+
+function updatePipelineTracker(phase) {
+  const stageEls = tracker.querySelectorAll(".stage");
+  const currentIdx = STAGES.indexOf(phase);
+
+  stageEls.forEach((el) => {
+    const stage = el.dataset.stage;
+    const idx = STAGES.indexOf(stage);
+    el.classList.remove("stage--done", "stage--active", "stage--pending");
+    if (idx < currentIdx) {
+      el.classList.add("stage--done");
+    } else if (idx === currentIdx) {
+      el.classList.add("stage--active");
+    } else {
+      el.classList.add("stage--pending");
+    }
+  });
+
+  phaseLabel.textContent = PHASE_LABELS[phase] || phase || "Working…";
+}
+
+function startElapsedTimer() {
+  pipelineStartTime = Date.now();
+  elapsedLabel.textContent = "0s";
+  elapsedTimer = setInterval(() => {
+    const s = Math.round((Date.now() - pipelineStartTime) / 1000);
+    elapsedLabel.textContent = `${s}s`;
+  }, 1000);
+}
+
+function stopElapsedTimer() {
+  if (elapsedTimer) {
+    clearInterval(elapsedTimer);
+    elapsedTimer = null;
+  }
 }
 
 // ── Form submit ────────────────────────────────────────────────────────────
-form.addEventListener('submit', async (e) => {
+form.addEventListener("submit", async (e) => {
   e.preventDefault();
   const query = queryInput.value.trim();
   if (!query) return;
 
   if (pollTimer) clearInterval(pollTimer);
+  stopElapsedTimer();
   currentJobId = null;
 
   clearError();
   hide(resultsSec);
-  show(statusSec);
+  hide(emptyState);
+  hide(noResultsBanner);
+  show(tracker);
   searchBtn.disabled = true;
-  setPhase('pending');
+  updatePipelineTracker("pending");
+  startElapsedTimer();
 
   try {
-    const res = await fetch('/api/search', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+    const res = await fetch("/api/search", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ query }),
     });
 
@@ -100,30 +249,30 @@ form.addEventListener('submit', async (e) => {
     const job = await res.json();
     currentJobId = job.job_id;
     startPolling();
-
   } catch (err) {
-    hide(statusSec);
+    hide(tracker);
+    stopElapsedTimer();
     searchBtn.disabled = false;
     showError(err.message);
   }
 });
 
 // ── Example chips ──────────────────────────────────────────────────────────
-document.querySelectorAll('.example-chip').forEach(btn => {
-  btn.addEventListener('click', () => {
+document.querySelectorAll(".example-chip").forEach((btn) => {
+  btn.addEventListener("click", () => {
     queryInput.value = btn.dataset.q;
-    form.dispatchEvent(new Event('submit'));
+    form.dispatchEvent(new Event("submit"));
   });
 });
 
 // ── Polling ────────────────────────────────────────────────────────────────
 let _pollErrors = 0;
-const _MAX_POLL_ERRORS = 8; // stop only after 8 consecutive failures (~16s)
+const _MAX_POLL_ERRORS = 8;
 
 function startPolling() {
   _pollErrors = 0;
   pollTimer = setInterval(pollJob, 2000);
-  pollJob(); // immediate first check
+  pollJob();
 }
 
 async function pollJob() {
@@ -134,135 +283,348 @@ async function pollJob() {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const job = await res.json();
 
-    _pollErrors = 0; // reset on success
-    setPhase(job.phase || job.status);
+    _pollErrors = 0;
+    updatePipelineTracker(job.phase || job.status);
 
-    if (job.status === 'done') {
+    if (job.status === "done") {
       clearInterval(pollTimer);
-      hide(statusSec);
+      stopElapsedTimer();
+      hide(tracker);
       searchBtn.disabled = false;
-      renderResults(job.result);
-    } else if (job.status === 'failed') {
+      if (job.result && job.result.rows && job.result.rows.length > 0) {
+        renderResults(job.result);
+      } else {
+        show(noResultsBanner);
+      }
+    } else if (job.status === "failed") {
       clearInterval(pollTimer);
-      hide(statusSec);
+      stopElapsedTimer();
+      hide(tracker);
       searchBtn.disabled = false;
-      showError(job.error || 'Pipeline failed. Check server logs.');
+      showError(job.error || "Pipeline failed. Check server logs.");
     }
-
   } catch (err) {
     _pollErrors++;
-    // Transient network error (ERR_NETWORK_CHANGED, etc.) — keep polling silently
     if (_pollErrors < _MAX_POLL_ERRORS) {
-      console.warn(`Poll error (${_pollErrors}/${_MAX_POLL_ERRORS}): ${err.message} — retrying…`);
+      console.warn(
+        `Poll error (${_pollErrors}/${_MAX_POLL_ERRORS}): ${err.message}`,
+      );
       return;
     }
-    // Too many consecutive failures — give up
     clearInterval(pollTimer);
-    hide(statusSec);
+    stopElapsedTimer();
+    hide(tracker);
     searchBtn.disabled = false;
-    showError(`Lost connection to server after ${_pollErrors} attempts. Refresh and try again.`);
+    showError(
+      `Lost connection to server after ${_pollErrors} attempts. Refresh and try again.`,
+    );
   }
 }
 
 // ── Render results ─────────────────────────────────────────────────────────
 function renderResults(data) {
-  // Entity type tag
-  metaEntityType.textContent = data.entity_type;
+  const m = data.metadata;
 
-  // Summary
-  const { metadata: m } = data;
-  metaSummary.textContent =
-    `${data.rows.length} entities · ${m.pages_scraped} pages scraped · ${m.urls_considered} URLs considered`;
+  // ── Summary strip ──
+  sumEntityType.textContent = data.entity_type;
+  sumRows.textContent = data.rows.length;
+  sumSources.textContent = m.urls_considered;
+  sumScraped.textContent = m.pages_scraped;
+  sumExtracted.textContent = m.pages_after_rerank || m.pages_scraped;
+  sumGapfill.textContent = m.gap_fill_used ? "Gap-fill: yes" : "Gap-fill: no";
+  sumDuration.textContent = `${m.duration_seconds}s`;
 
-  // Angles
-  anglesList.innerHTML = '';
-  (m.search_angles || []).forEach(angle => {
-    const li = document.createElement('li');
-    li.textContent = angle;
-    anglesList.appendChild(li);
-  });
+  // ── Retrieval plan panel ──
+  renderRetrievalPlan(data, m);
 
-  // Run metadata
-  const gapNote = m.gap_fill_used ? ' · gap-fill applied' : '';
-  runMeta.textContent =
-    `${m.entities_extracted} entities extracted · ${m.entities_after_merge} after merge ` +
-    `· ${m.duration_seconds}s${gapNote}`;
+  // ── Quality controls panel ──
+  renderQualityControls(m);
+
+  // ── Run stats panel ──
+  renderRunStats(m);
 
   // Export buttons
-  exportJson.onclick = () => window.open(`/api/export/json?query_id=${data.query_id}`);
-  exportCsv.onclick  = () => window.open(`/api/export/csv?query_id=${data.query_id}`);
+  exportJson.onclick = () =>
+    window.open(`/api/export/json?query_id=${data.query_id}`);
+  exportCsv.onclick = () =>
+    window.open(`/api/export/csv?query_id=${data.query_id}`);
 
-  // Build table header
-  const cols = data.columns;
-  tableHead.innerHTML = '';
-  const tr = document.createElement('tr');
-  const thIdx = document.createElement('th');
-  thIdx.textContent = '#';
-  thIdx.className = 'col-idx';
-  tr.appendChild(thIdx);
-  cols.forEach(col => {
-    const th = document.createElement('th');
-    th.textContent = humanColumn(col);
-    tr.appendChild(th);
+  // ── Table ──
+  renderTable(data);
+
+  show(resultsSec);
+  resultsSec.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+// ── Retrieval plan panel ───────────────────────────────────────────────────
+function renderRetrievalPlan(data, m) {
+  let html = "";
+  html += `<div class="plan-row"><span class="plan-label">Entity type:</span> <span class="plan-value">${esc(data.entity_type)}</span></div>`;
+  html += `<div class="plan-row"><span class="plan-label">Columns:</span> <span class="plan-value">${data.columns.map((c) => esc(humanColumn(c))).join(", ")}</span></div>`;
+
+  if (m.facets && m.facets.length > 0) {
+    html +=
+      '<div class="plan-facets"><span class="plan-label">Search facets:</span>';
+    html += '<ul class="facet-list">';
+    for (const f of m.facets) {
+      html += '<li class="facet-item">';
+      html += `<span class="facet-type">${esc(f.type)}</span> `;
+      html += `<span class="facet-query">${esc(f.query)}</span>`;
+      if (f.expected_fill_columns && f.expected_fill_columns.length > 0) {
+        html += `<span class="facet-cols"> → ${f.expected_fill_columns.map((c) => esc(humanColumn(c))).join(", ")}</span>`;
+      }
+      html += "</li>";
+    }
+    html += "</ul></div>";
+  } else if (m.search_angles && m.search_angles.length > 0) {
+    html +=
+      '<div class="plan-facets"><span class="plan-label">Search angles:</span>';
+    html += '<ul class="facet-list">';
+    for (const a of m.search_angles) {
+      html += `<li class="facet-item">${esc(a)}</li>`;
+    }
+    html += "</ul></div>";
+  }
+
+  if (m.rerank_scorer) {
+    html += '<div class="plan-rerank">';
+    html += `<span class="plan-label">Reranking:</span> `;
+    html += `${m.pages_scraped} pages → ${m.pages_after_rerank} selected (${esc(m.rerank_scorer)})`;
+    html += "</div>";
+  }
+
+  retrievalBody.innerHTML = html;
+}
+
+// ── Quality controls panel ────────────────────────────────────────────────
+function renderQualityControls(m) {
+  const items = [];
+
+  if (m.rerank_scorer) {
+    items.push({
+      icon: "⚡",
+      text: `Cross-encoder reranking: ${m.pages_scraped} → ${m.pages_after_rerank} pages`,
+    });
+  }
+  if (m.entities_extracted && m.entities_after_merge) {
+    const deduped = m.entities_extracted - m.entities_after_merge;
+    if (deduped > 0) {
+      items.push({
+        icon: "🔗",
+        text: `Entity deduplication: ${deduped} duplicates merged (${m.entities_extracted} → ${m.entities_after_merge})`,
+      });
+    }
+  }
+  items.push({ icon: "✓", text: "Cell-level entity-alignment verification" });
+  items.push({
+    icon: "✓",
+    text: "Field validation (URL, phone, rating normalization)",
   });
-  tableHead.appendChild(tr);
+  items.push({
+    icon: "✓",
+    text: "Source-quality scoring (official / editorial / directory / marketplace)",
+  });
+  items.push({
+    icon: "✓",
+    text: "Source-diversity penalty for single-domain rows",
+  });
+  if (m.gap_fill_used) {
+    items.push({ icon: "↻", text: "Gap-fill enrichment run on sparse rows" });
+  }
+  items.push({
+    icon: "✓",
+    text: "Low-information & marketplace-only row filtering",
+  });
 
-  // Build table body
-  tableBody.innerHTML = '';
+  let html = '<ul class="qc-list">';
+  for (const it of items) {
+    html += `<li><span class="qc-icon">${it.icon}</span> ${esc(it.text)}</li>`;
+  }
+  html += "</ul>";
+  qualityBody.innerHTML = html;
+}
+
+// ── Run stats panel ───────────────────────────────────────────────────────
+function renderRunStats(m) {
+  const rows = [
+    ["Total duration", `${m.duration_seconds}s`],
+    ["Execution mode", "Async background job (non-blocking)"],
+    ["URLs considered", m.urls_considered],
+    ["Pages scraped", m.pages_scraped],
+    ["Pages sent to extraction", m.pages_after_rerank || m.pages_scraped],
+    ["Entities extracted", m.entities_extracted],
+    ["Entities after merge", m.entities_after_merge],
+    ["Gap-fill", m.gap_fill_used ? "Yes" : "No"],
+  ];
+  if (m.rerank_scorer) {
+    rows.push(["Rerank scorer", m.rerank_scorer]);
+  }
+
+  let html = '<table class="stats-table">';
+  for (const [label, val] of rows) {
+    html += `<tr><td class="stats-label">${esc(label)}</td><td class="stats-value">${esc(String(val))}</td></tr>`;
+  }
+  html += "</table>";
+  statsBody.innerHTML = html;
+}
+
+// ── Table rendering ───────────────────────────────────────────────────────
+function renderTable(data) {
+  const cols = data.columns;
+
+  // Header
+  tableHead.innerHTML = "";
+  const headTr = document.createElement("tr");
+  const thIdx = document.createElement("th");
+  thIdx.textContent = "#";
+  thIdx.className = "col-idx";
+  headTr.appendChild(thIdx);
+  cols.forEach((col) => {
+    const th = document.createElement("th");
+    th.textContent = humanColumn(col);
+    headTr.appendChild(th);
+  });
+  const thTrust = document.createElement("th");
+  thTrust.textContent = "Trust";
+  thTrust.className = "col-trust";
+  headTr.appendChild(thTrust);
+  tableHead.appendChild(headTr);
+
+  // Body
+  tableBody.innerHTML = "";
   data.rows.forEach((row, rowIdx) => {
-    const tr = document.createElement('tr');
+    const tr = document.createElement("tr");
 
-    // Index cell
-    const tdIdx = document.createElement('td');
-    tdIdx.className = 'col-idx';
+    // Index
+    const tdIdx = document.createElement("td");
+    tdIdx.className = "col-idx";
     tdIdx.textContent = rowIdx + 1;
     tr.appendChild(tdIdx);
 
     // Data cells
-    cols.forEach(col => {
-      const td = document.createElement('td');
+    cols.forEach((col) => {
+      const td = document.createElement("td");
       const cell = row.cells[col];
 
       if (cell && cell.value) {
-        td.className = 'cell-filled';
-        td.title = 'Click to view evidence';
+        td.className = "cell-filled";
+        td.title = "Click to view evidence";
 
-        const span = document.createElement('span');
-        span.className = 'cell-value';
+        const span = document.createElement("span");
+        span.className = "cell-value";
         span.textContent = cell.value;
 
-        const dot = document.createElement('span');
+        const dot = document.createElement("span");
         dot.className = `conf-dot ${confClass(cell.confidence)}`;
         dot.title = `Confidence: ${Math.round(cell.confidence * 100)}%`;
 
         td.appendChild(span);
         td.appendChild(dot);
 
-        td.addEventListener('click', () => openModal(col, cell));
+        td.addEventListener("click", () => openModal(col, cell, row));
       } else {
-        td.className = 'cell-empty';
-        td.textContent = '—';
+        td.className = "cell-empty";
+        td.textContent = "—";
       }
 
       tr.appendChild(td);
     });
 
+    // Trust badges column
+    const tdTrust = document.createElement("td");
+    tdTrust.className = "col-trust";
+    tdTrust.innerHTML = buildTrustBadges(row);
+    tr.appendChild(tdTrust);
+
     tableBody.appendChild(tr);
   });
+}
 
-  show(resultsSec);
-  resultsSec.scrollIntoView({ behavior: 'smooth', block: 'start' });
+// ── Row trust badges ──────────────────────────────────────────────────────
+function buildTrustBadges(row) {
+  const badges = [];
+
+  // Sources count
+  badges.push(
+    `<span class="badge badge--neutral">${row.sources_count} src</span>`,
+  );
+
+  // Confidence
+  const confLvl = confLabel(row.aggregate_confidence);
+  const confCls =
+    confLvl === "high"
+      ? "badge--green"
+      : confLvl === "medium"
+        ? "badge--yellow"
+        : "badge--red";
+  badges.push(`<span class="badge ${confCls}">${confLvl} conf</span>`);
+
+  // Source types
+  const entityWebsite =
+    row.cells.website?.value ||
+    row.cells.url?.value ||
+    row.cells.homepage?.value ||
+    "";
+  const types = classifySourceForRow(row.cells, entityWebsite);
+  if (types.has("official"))
+    badges.push('<span class="badge badge--green">official</span>');
+  if (types.has("editorial"))
+    badges.push('<span class="badge badge--blue">editorial</span>');
+  if (types.has("directory"))
+    badges.push('<span class="badge badge--neutral">directory</span>');
+  if (types.has("marketplace"))
+    badges.push('<span class="badge badge--yellow">marketplace</span>');
+
+  // Source diversity
+  const domains = new Set();
+  for (const cell of Object.values(row.cells)) {
+    if (cell && cell.source_url) domains.add(extractDomain(cell.source_url));
+  }
+  if (domains.size <= 1 && Object.keys(row.cells).length > 1) {
+    badges.push('<span class="badge badge--red">single-source</span>');
+  }
+
+  return badges.join(" ");
 }
 
 // ── Modal ──────────────────────────────────────────────────────────────────
-function openModal(col, cell) {
-  modalColLabel.textContent  = humanColumn(col);
-  modalValue.textContent     = cell.value;
-  modalConf.textContent      = `Confidence: ${Math.round(cell.confidence * 100)}%`;
-  modalSnippet.textContent   = cell.evidence_snippet || '(no snippet)';
-  modalSourceUrl.textContent = cell.source_url || '';
-  modalSourceUrl.href        = cell.source_url || '#';
-  modalSourceTitle.textContent = cell.source_title ? `· ${cell.source_title}` : '';
+function openModal(col, cell, row) {
+  modalColLabel.textContent = humanColumn(col);
+  modalValue.textContent = cell.value;
+  modalConf.textContent = `${Math.round(cell.confidence * 100)}% confidence`;
+  modalConf.className = `modal__conf ${confClass(cell.confidence)}`;
+  modalSnippet.textContent = cell.evidence_snippet || "(no snippet)";
+  modalSourceUrl.textContent = cell.source_url || "";
+  modalSourceUrl.href = cell.source_url || "#";
+  modalSourceTitle.textContent = cell.source_title ? cell.source_title : "";
+
+  // Source type badge
+  const entityWebsite =
+    row?.cells?.website?.value || row?.cells?.url?.value || "";
+  const srcDomain = extractDomain(cell.source_url || "");
+  let srcType = classifySource(cell.source_url || "");
+  if (entityWebsite && extractDomain(entityWebsite) === srcDomain) {
+    srcType = "official";
+  }
+  const badgeClass =
+    {
+      official: "badge--green",
+      editorial: "badge--blue",
+      directory: "badge--neutral",
+      marketplace: "badge--yellow",
+      unknown: "badge--dim",
+    }[srcType] || "badge--dim";
+  modalSourceBadge.textContent = srcType;
+  modalSourceBadge.className = `modal__source-badge badge ${badgeClass}`;
+
+  // Flags
+  const flags = [];
+  if (cell.confidence < 0.5) flags.push("low-confidence");
+  if (row && row.sources_count <= 1) flags.push("single-source");
+  modalFlags.innerHTML = flags.length
+    ? flags.map((f) => `<span class="flag">${esc(f)}</span>`).join(" ")
+    : "";
+
   show(modalOverlay);
 }
 
@@ -270,10 +632,17 @@ function closeModal() {
   hide(modalOverlay);
 }
 
-modalClose.addEventListener('click', closeModal);
-modalOverlay.addEventListener('click', (e) => {
+modalClose.addEventListener("click", closeModal);
+modalOverlay.addEventListener("click", (e) => {
   if (e.target === modalOverlay) closeModal();
 });
-document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') closeModal();
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") closeModal();
 });
+
+// ── HTML escaper ──────────────────────────────────────────────────────────
+function esc(str) {
+  const d = document.createElement("div");
+  d.textContent = str;
+  return d.innerHTML;
+}

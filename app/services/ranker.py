@@ -18,15 +18,18 @@ import math
 from app.core.logging import get_logger
 from app.models.schema import EntityRow, PlannerOutput
 from app.services.source_quality import row_source_quality
+from app.utils.url import extract_domain
+from app.core.config import get_settings
 
 log = get_logger(__name__)
 
 _WEIGHTS = {
-    "completeness": 0.28,
-    "avg_confidence": 0.22,
-    "source_support": 0.10,
-    "actionable": 0.08,
+    "completeness": 0.25,
+    "avg_confidence": 0.20,
+    "source_support": 0.08,
+    "actionable": 0.07,
     "source_quality": 0.32,
+    "source_diversity": 0.08,
 }
 
 _WEAK_SIGNAL_COLS = {
@@ -45,6 +48,30 @@ def _is_actionable_col(col: str) -> bool:
     return normalized != "name" and normalized not in _WEAK_SIGNAL_COLS
 
 
+def _source_diversity(row: EntityRow) -> float:
+    """
+    Fraction of cells NOT contributed by the single most-dominant domain.
+    1.0 = every cell from a different domain; 0.0 = all cells from one domain.
+    """
+    if not row.cells:
+        return 0.0
+    counts: dict[str, int] = {}
+    for cell in row.cells.values():
+        domain = extract_domain(cell.source_url) or "__unknown__"
+        counts[domain] = counts.get(domain, 0) + 1
+    total = sum(counts.values())
+    max_share = max(counts.values())
+    return round(1.0 - (max_share / total), 3)
+
+
+def _get_weights() -> dict[str, float]:
+    """Return weights with source_diversity from config (supports ablation)."""
+    settings = get_settings()
+    w = dict(_WEIGHTS)
+    w["source_diversity"] = settings.source_diversity_weight
+    return w
+
+
 def _score(row: EntityRow, num_columns: int) -> float:
     completeness = len(row.cells) / max(num_columns, 1)
 
@@ -59,13 +86,16 @@ def _score(row: EntityRow, num_columns: int) -> float:
         any(_is_actionable_col(col) for col in row.cells)
     )
     source_quality = row_source_quality(row)
+    source_diversity = _source_diversity(row)
 
+    w = _get_weights()
     return (
-        _WEIGHTS["completeness"] * completeness
-        + _WEIGHTS["avg_confidence"] * avg_conf
-        + _WEIGHTS["source_support"] * source_support
-        + _WEIGHTS["actionable"] * actionable
-        + _WEIGHTS["source_quality"] * source_quality
+        w["completeness"] * completeness
+        + w["avg_confidence"] * avg_conf
+        + w["source_support"] * source_support
+        + w["actionable"] * actionable
+        + w["source_quality"] * source_quality
+        + w["source_diversity"] * source_diversity
     )
 
 

@@ -1,0 +1,62 @@
+[
+  {
+    "id": "food-pizza-brooklyn",
+    "query": "best pizza restaurants in Brooklyn, New York",
+    "category": "food",
+    "notes": "Classic local-business query. Expect name, address, phone, website, rating."
+  },
+  {
+    "id": "food-ramen-la",
+    "query": "top ramen shops in Los Angeles",
+    "category": "food",
+    "notes": "Niche cuisine, fewer editorial sources. Tests extraction breadth."
+  },
+  {
+    "id": "food-coffee-seattle",
+    "query": "best specialty coffee roasters in Seattle",
+    "category": "food",
+    "notes": "Mix of chains and independents. Good for source diversity signal."
+  },
+  {
+    "id": "tech-ai-startups",
+    "query": "most promising AI startups founded in 2024",
+    "category": "tech",
+    "notes": "Startup/tech domain. Expect name, founded, funding, website, description."
+  },
+  {
+    "id": "tech-devtools-2025",
+    "query": "best developer tools and productivity apps in 2025",
+    "category": "tech",
+    "notes": "Broad tech query. Tests planner facet quality on editorial-heavy results."
+  },
+  {
+    "id": "tech-cybersecurity-companies",
+    "query": "leading cybersecurity companies in the United States",
+    "category": "tech",
+    "notes": "Enterprise domain. Mix of official sources and analyst reports."
+  },
+  {
+    "id": "travel-budget-europe",
+    "query": "best budget-friendly hostels in Lisbon, Portugal",
+    "category": "travel",
+    "notes": "Travel/hospitality domain. Tests extraction from booking-style pages."
+  },
+  {
+    "id": "travel-hiking-colorado",
+    "query": "top rated hiking trails near Denver, Colorado",
+    "category": "travel",
+    "notes": "Outdoor/recreation. Non-business entities; tests schema flexibility."
+  },
+  {
+    "id": "food-vegan-london",
+    "query": "best vegan restaurants in London",
+    "category": "food",
+    "notes": "International query. Tests Brave API coverage outside the US."
+  },
+  {
+    "id": "tech-open-source-databases",
+    "query": "top open source databases for production use in 2025",
+    "category": "tech",
+    "notes": "Software comparison query. Tests comparison facet type selection."
+  }
+]

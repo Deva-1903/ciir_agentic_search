@@ -2,58 +2,105 @@
 Schema planner: given a raw user query, infer
   - entity_type
   - columns (5-8, always includes "name")
-  - search_angles (3-5 diversified queries)
+  - facets: 3-5 typed retrieval facets (each with its own query + intent)
+
+Facet-typed planning replaces plain paraphrase "search_angles". Each facet
+states its retrieval intent and which columns it is expected to help fill, so
+downstream stages (reranker, extractor) can reason about *why* each page was
+retrieved. `search_angles` is still exposed for backward compatibility — it
+is simply the list of facet queries.
 """
 
 from __future__ import annotations
 
 from app.core.logging import get_logger
-from app.models.schema import PlannerOutput
+from app.models.schema import PlannerOutput, SearchFacet
 from app.services.llm import chat_json_validated
 
 log = get_logger(__name__)
 
 # ── Prompts ───────────────────────────────────────────────────────────────────
 
-_SYSTEM = """You are a search schema planner. Your job is to analyze a user's topic query
-and produce a structured plan for discovering entities on the web.
+_SYSTEM = """You are a search retrieval planner. Given a user's topic query, produce a
+structured plan for discovering entities on the web.
 
 Return ONLY a JSON object with exactly these keys:
 
 {
-  "entity_type": "<singular noun for the type of entity, e.g. startup, restaurant, tool, person>",
+  "entity_type": "<singular noun for the entity type, e.g. startup, restaurant, tool>",
   "columns": ["name", "<col2>", "<col3>", ...],
-  "search_angles": ["<query1>", "<query2>", ...]
+  "facets": [
+    {
+      "type": "<one of: entity_list | official_source | editorial_review | attribute_specific | news_recent | comparison>",
+      "query": "<natural search-engine query string>",
+      "expected_fill_columns": ["<column>", ...],
+      "rationale": "<short sentence on why this facet helps>"
+    }
+  ]
 }
 
 Rules:
-- "name" must always be the first column.
-- Include 5–8 columns total. Choose attributes that are discoverable on the web and
-  specific to the entity type. Avoid vague columns like "description" or "overview".
-- Include 3–5 search angles. Make them diverse (e.g. combine list-type queries with
-  official-site queries, funding queries, news queries) to maximize recall.
-- Use natural search engine queries as search angles (not topic phrases).
-- Do not add comments or extra keys. Output valid JSON only.
+- "name" must be the first column. Include 5–8 columns total. Prefer concrete,
+  discoverable attributes over vague ones like "description" or "overview".
+- Produce 3–5 facets. Each facet must have a distinct retrieval INTENT — do not
+  just paraphrase the user query.
+- Facet types explained:
+    entity_list        → broad list / "top X" / roundup pages for candidate discovery
+    official_source    → official homepages, about/contact/menu pages (high trust)
+    editorial_review   → editorial, review, or curated-guide articles
+    attribute_specific → targets a specific column (e.g. funding, rating, phone)
+    news_recent        → recent news, press releases, announcements
+    comparison         → comparative / "X vs Y" articles
+- Every facet must declare `expected_fill_columns` — the columns it is expected
+  to help fill. Only use column names from the `columns` list.
+- `rationale` should be one short sentence.
+- Output valid JSON only. No comments, no extra keys.
 """
 
 _USER_TEMPLATE = """User query: {query}
 
-Produce the JSON schema plan."""
+Produce the JSON retrieval plan."""
 
 
 # ── Hardcoded fallback if LLM fails ──────────────────────────────────────────
 
-_FALLBACK: dict = {
-    "entity_type": "entity",
-    "columns": ["name", "website", "description", "category", "location"],
-    "search_angles": ["{query}", "best {query}", "{query} list", "{query} top companies"],
-}
+_FALLBACK_COLUMNS = ["name", "website", "description", "category", "location"]
+
+
+def _fallback_plan(query: str) -> PlannerOutput:
+    """Deterministic fallback used when the planner LLM call fails."""
+    facets = [
+        SearchFacet(
+            type="entity_list",
+            query=f"top {query} list",
+            expected_fill_columns=["name", "website"],
+            rationale="broad list pages surface candidate entities",
+        ),
+        SearchFacet(
+            type="official_source",
+            query=f"{query} official website",
+            expected_fill_columns=["website", "location"],
+            rationale="official pages are higher trust for core facts",
+        ),
+        SearchFacet(
+            type="editorial_review",
+            query=f"best {query} review",
+            expected_fill_columns=["name", "category"],
+            rationale="editorial reviews provide curated, vetted entries",
+        ),
+    ]
+    return PlannerOutput(
+        entity_type="entity",
+        columns=list(_FALLBACK_COLUMNS),
+        search_angles=[f.query for f in facets],
+        facets=facets,
+    )
 
 
 # ── Public API ─────────────────────────────────────────────────────────────────
 
 async def plan_schema(query: str) -> PlannerOutput:
-    """Return a schema plan for the given user query."""
+    """Return a facet-typed schema plan for the given user query."""
     log.info("Planning schema for query: %r", query)
     try:
         result = await chat_json_validated(
@@ -61,25 +108,29 @@ async def plan_schema(query: str) -> PlannerOutput:
             _USER_TEMPLATE.format(query=query),
             PlannerOutput,
             temperature=0.3,
-            max_tokens=512,
+            max_tokens=768,
         )
     except Exception as exc:
-        log.warning("Planner LLM call failed (%s), using fallback schema.", exc)
-        fallback = {k: v for k, v in _FALLBACK.items()}
-        fallback["search_angles"] = [
-            a.format(query=query) for a in fallback["search_angles"]
-        ]
-        result = PlannerOutput(**fallback)
+        log.warning("Planner LLM call failed (%s), using fallback plan.", exc)
+        result = _fallback_plan(query)
 
-    # Clamp lengths
     result.columns = _ensure_name_first(result.columns[:8])
-    result.search_angles = result.search_angles[:5]
+    result.facets = _sanitize_facets(result.facets, result.columns)[:5]
+
+    # Keep search_angles derived from facet queries for backward compatibility
+    # with existing callers (brave_search, routes, gap_fill).
+    result.search_angles = [f.query for f in result.facets][:5]
+
+    # Safety net: if the LLM returned no facets, fall back.
+    if not result.facets:
+        log.warning("Planner returned no facets; using fallback plan.")
+        result = _fallback_plan(query)
 
     log.info(
-        "Schema: entity_type=%r  columns=%s  angles=%d",
+        "Plan: entity_type=%r columns=%s facets=%s",
         result.entity_type,
         result.columns,
-        len(result.search_angles),
+        [(f.type, f.query) for f in result.facets],
     )
     return result
 
@@ -87,3 +138,22 @@ async def plan_schema(query: str) -> PlannerOutput:
 def _ensure_name_first(columns: list[str]) -> list[str]:
     cols = [c for c in columns if c.lower() != "name"]
     return ["name"] + cols
+
+
+def _sanitize_facets(
+    facets: list[SearchFacet],
+    valid_columns: list[str],
+) -> list[SearchFacet]:
+    """Drop empty queries and restrict expected_fill_columns to schema columns."""
+    valid = set(valid_columns)
+    cleaned: list[SearchFacet] = []
+    for facet in facets:
+        q = (facet.query or "").strip()
+        if not q:
+            continue
+        facet.query = q
+        facet.expected_fill_columns = [
+            c for c in facet.expected_fill_columns if c in valid
+        ]
+        cleaned.append(facet)
+    return cleaned

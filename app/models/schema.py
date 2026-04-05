@@ -14,10 +14,45 @@ class SearchRequest(BaseModel):
 
 # ── Planner output ─────────────────────────────────────────────────────────────
 
+# Allowed facet types. Kept open-ended (str) but the planner is prompted to use
+# these canonical values so downstream code can reason about retrieval intent.
+#   entity_list       — broad list/overview pages that surface candidates
+#   official_source   — official homepages / about pages (high trust)
+#   editorial_review  — curated editorial / review articles
+#   attribute_specific— query targeting a particular column (funding, rating, …)
+#   news_recent       — recent news / announcements
+#   comparison        — comparative or "X vs Y" articles
+#   other             — fallback for anything that doesn't fit
+_CANONICAL_FACET_TYPES = {
+    "entity_list",
+    "official_source",
+    "editorial_review",
+    "attribute_specific",
+    "news_recent",
+    "comparison",
+    "other",
+}
+
+
+class SearchFacet(BaseModel):
+    """A typed retrieval facet. Each facet expresses one clear search intent."""
+    type: str                                  # see _CANONICAL_FACET_TYPES
+    query: str                                 # natural search-engine query
+    expected_fill_columns: List[str] = Field(default_factory=list)
+    rationale: str = ""
+
+    @field_validator("type")
+    @classmethod
+    def _normalize_type(cls, v: str) -> str:
+        v = (v or "").strip().lower().replace("-", "_").replace(" ", "_")
+        return v if v in _CANONICAL_FACET_TYPES else "other"
+
+
 class PlannerOutput(BaseModel):
     entity_type: str
-    columns: List[str]          # always starts with "name"; max 8
-    search_angles: List[str]    # max 5
+    columns: List[str]                 # always starts with "name"; max 8
+    search_angles: List[str]           # derived from facets; max 5 (backward compat)
+    facets: List[SearchFacet] = Field(default_factory=list)
 
 
 # ── Brave search ───────────────────────────────────────────────────────────────
@@ -79,8 +114,11 @@ class EntityRow(BaseModel):
 
 class SearchMetadata(BaseModel):
     search_angles: List[str]
+    facets: List[SearchFacet] = Field(default_factory=list)
     urls_considered: int
     pages_scraped: int
+    pages_after_rerank: Optional[int] = None
+    rerank_scorer: Optional[str] = None
     entities_extracted: int
     entities_after_merge: int
     gap_fill_used: bool

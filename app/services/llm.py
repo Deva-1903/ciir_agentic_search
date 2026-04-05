@@ -1,16 +1,20 @@
 """
 Thin wrapper around the OpenAI-compatible chat completions API.
 
+Supports Groq (primary) and OpenAI (fallback) via base URL switching.
+
 Handles:
 - JSON mode responses
 - Automatic retries with exponential backoff
 - Basic JSON validation before returning
+- Fallback JSON extraction from markdown fences
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import re
 from typing import Any, Optional, Type
 
 from openai import AsyncOpenAI, APIError, RateLimitError, APITimeoutError
@@ -31,14 +35,35 @@ def _get_client() -> AsyncOpenAI:
     if _client is None:
         settings = get_settings()
         kwargs: dict = {
-            "api_key": settings.openai_api_key,
+            "api_key": settings.active_api_key,
             "timeout": 60.0,   # hard 60s per call — no silent hangs
             "max_retries": 0,  # retries are handled explicitly in chat_json
         }
-        if settings.openai_base_url:
-            kwargs["base_url"] = settings.openai_base_url
+        if settings.active_base_url:
+            kwargs["base_url"] = settings.active_base_url
+        log.info("LLM client: provider=%s  model=%s  base_url=%s",
+                 settings.llm_provider, settings.active_model,
+                 settings.active_base_url or "(default)")
         _client = AsyncOpenAI(**kwargs)
     return _client
+
+
+def _extract_json(raw: str) -> dict[str, Any]:
+    """Parse JSON from raw LLM output, handling markdown fences."""
+    raw = raw.strip()
+    # Try direct parse first
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+    # Try extracting from ```json ... ``` fences
+    m = re.search(r'```(?:json)?\s*\n?(.*?)\n?\s*```', raw, re.DOTALL)
+    if m:
+        try:
+            return json.loads(m.group(1).strip())
+        except json.JSONDecodeError:
+            pass
+    raise ValueError(f"LLM returned unparseable JSON: {raw[:300]}")
 
 
 # ── Core call ─────────────────────────────────────────────────────────────────
@@ -65,7 +90,7 @@ async def chat_json(
         try:
             settings = get_settings()
             response = await client.chat.completions.create(
-                model=settings.openai_model,
+                model=settings.active_model,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 response_format={"type": "json_object"},
@@ -77,8 +102,8 @@ async def chat_json(
             )
             raw = response.choices[0].message.content or ""
             try:
-                return json.loads(raw)
-            except json.JSONDecodeError as exc:
+                return _extract_json(raw)
+            except ValueError as exc:
                 log.error("LLM returned invalid JSON: %s …", raw[:200])
                 raise ValueError(f"LLM returned invalid JSON: {exc}") from exc
         except APIError as exc:

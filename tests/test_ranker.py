@@ -109,6 +109,46 @@ class TestRankRows:
         assert ranked[0].entity_id == "strong"
 
 
+class TestSourceDiversity:
+    def test_multi_domain_row_beats_single_domain_row_when_others_equal(self):
+        plan = _plan(["name", "address", "phone"])
+
+        def _make_row(entity_id, domain_a, domain_b):
+            return EntityRow(
+                entity_id=entity_id,
+                cells={
+                    "name": Cell(
+                        value=entity_id,
+                        source_url=f"https://{domain_a}/page",
+                        source_title="T",
+                        evidence_snippet=entity_id,
+                        confidence=0.9,
+                    ),
+                    "address": Cell(
+                        value="1 Main St",
+                        source_url=f"https://{domain_a}/address",
+                        source_title="T",
+                        evidence_snippet=f"{entity_id} 1 Main St",
+                        confidence=0.9,
+                    ),
+                    "phone": Cell(
+                        value="555-0000",
+                        source_url=f"https://{domain_b}/phone",
+                        source_title="T",
+                        evidence_snippet=f"{entity_id} 555-0000",
+                        confidence=0.9,
+                    ),
+                },
+                aggregate_confidence=0.9,
+                sources_count=2,
+            )
+
+        diverse = _make_row("diverse", "one.com", "two.com")
+        mono = _make_row("mono", "one.com", "one.com")
+        ranked = rank_rows([mono, diverse], plan)
+        assert ranked[0].entity_id == "diverse"
+
+
 class TestPruneRows:
     def test_prunes_generic_name_plus_one_weak_field_rows(self):
         plan = _plan(["name", "address", "cuisine_type", "rating"])

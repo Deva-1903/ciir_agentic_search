@@ -20,6 +20,11 @@ class Settings(BaseSettings):
     openai_model: str = "gpt-4o-mini"
     openai_base_url: Optional[str] = None  # None → use default OpenAI URL
 
+    # Groq (primary LLM provider — OpenAI-compatible API)
+    groq_api_key: str = ""
+    groq_model: str = "llama-3.1-70b-versatile"
+    groq_base_url: str = "https://api.groq.com/openai/v1"
+
     # App
     app_env: str = "development"
     log_level: str = "INFO"
@@ -39,9 +44,36 @@ class Settings(BaseSettings):
     gap_fill_max_entities: int = 3
     gap_fill_max_urls_per_entity: int = 2
 
+    # Reranker (cross-encoder before extraction)
+    rerank_enabled: bool = True
+    rerank_top_k: int = 10  # extract only from top-K reranked pages
+
+    # Ablation toggles
+    cell_verifier_enabled: bool = True
+    source_diversity_weight: float = 0.08
+
     # DB — lives outside the project root so --reload doesn't detect SQLite
     # writes as file changes and restart the worker mid-pipeline
     db_path: str = "/tmp/agentic_search.db"
+
+    @property
+    def llm_provider(self) -> str:
+        """Return 'groq' if GROQ_API_KEY is set, else 'openai'."""
+        return "groq" if self.groq_api_key else "openai"
+
+    @property
+    def active_api_key(self) -> str:
+        return self.groq_api_key if self.groq_api_key else self.openai_api_key
+
+    @property
+    def active_model(self) -> str:
+        return self.groq_model if self.groq_api_key else self.openai_model
+
+    @property
+    def active_base_url(self) -> str | None:
+        if self.groq_api_key:
+            return self.groq_base_url
+        return self.openai_base_url
 
 
 @lru_cache(maxsize=1)

@@ -25,6 +25,7 @@ from app.models.schema import (
     PlannerOutput,
     ScrapedPage,
 )
+from app.services.field_validator import validate_and_normalize
 from app.services.llm import chat_json
 from app.utils.text import chunk_text, truncate
 
@@ -137,8 +138,12 @@ async def _extract_from_chunk(
             conf = float(cell_data.get("confidence", 0.5))
             conf = max(0.0, min(1.0, conf))
             if value and snippet:
+                normalized, ok = validate_and_normalize(col, value)
+                if not ok:
+                    log.debug("Dropping malformed cell %s=%r (page=%s)", col, value, page.url)
+                    continue
                 cells[col] = CellDraft(
-                    value=value,
+                    value=normalized,
                     evidence_snippet=truncate(snippet, 200),
                     confidence=conf,
                 )
