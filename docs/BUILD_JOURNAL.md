@@ -43,7 +43,10 @@ Build a provenance-first entity discovery app for the CIIR Agentic Search Challe
 - **Added (Claude):** `official_site.py` — canonical/official-site resolution as a first-class step before focused fill
 - **Softened (Claude):** early prune/verifier behavior — more rows survive to ranking and late verification
 - **Expanded (Claude):** evaluation metrics — actionable-field rate, official-site rate, normalized query/query-family metadata
-- **Current state:** normalized-query, discovery-first pipeline with constrained planning, typed retrieval facets, candidate merge, official-site resolution, focused fill, late verification, per-cell provenance, async jobs, exports, evaluation harness, and reviewer-facing UI. Split-provider LLM remains (OpenAI planner + Groq extractor with OpenAI fallback), but the retrieval story is now simpler and higher-recall than the earlier brittle single-pass extraction flow.
+- **Hardened (Claude):** default demo extractor path reverted to OpenAI; Groq kept optional as alternate/fallback to avoid reviewer-facing 429 churn
+- **Hardened (Claude):** late pseudo-entity filtering removes category/list labels such as `"AI Copilots & Agents for Psychiatry"` from final rows
+- **Hardened (Claude):** website semantics now prefer canonical homepages and reject article/directory URLs as final `website` values
+- **Current state:** normalized-query, discovery-first pipeline with constrained planning, typed retrieval facets, candidate merge, official-site resolution, focused fill, late verification, per-cell provenance, async jobs, exports, evaluation harness, and reviewer-facing UI. OpenAI is now the default planner + demo extractor path, with Groq remaining optional as an alternate/fallback extractor when desired.
 
 ---
 
@@ -1158,6 +1161,41 @@ Next step: Improve canonical-domain recall and add a small benchmark of labeled 
 
 ---
 
+### Iteration 22 - Hardening the reviewer demo path, pseudo-entity filter, and website semantics
+
+Date: 2026-04-04
+Goal: Improve runtime stability and reviewer trust without changing the overall architecture by fixing three concrete demo issues: unstable default extractor routing, pseudo-entity rows, and semantically wrong website values.
+Initial assumption: Iteration 21 restored broad-query recall, but the demo still looked brittle because Groq was the default extractor path, category/list labels could survive as rows, and `website` sometimes reflected article or directory URLs instead of official homepages.
+Issue discovered: Three reviewer-facing problems were still visible in real runs. First, Groq remained the configured default extractor even though repeated 429s meant OpenAI fallback was doing much of the real work anyway. Second, list-page labels like `"AI Copilots & Agents for Psychiatry"` could survive to the final table as if they were real startups. Third, website validation and canonical resolution were permissive enough that editorial articles or directory roots could populate the final `website` cell.
+How it manifested: Startup/runtime logs still showed `extractor=groq/...` until the env override was corrected. On the healthcare smoke query, a pseudo row with entity id `ai-copilots-agents-for-psychiatry` appeared in one run because the listing root looked superficially like a plausible website. Separate audit traces also showed article/blog URLs being accepted as website candidates, which made final rows look semantically wrong even when the rest of the evidence was good.
+Why the old behavior was insufficient: Reviewer-facing demos need stable runtime defaults and trustworthy semantics. Recovering from Groq throttling via fallback was better than returning zero rows, but it still added avoidable latency and made the runtime story look fragile. A category label row undermines confidence in the discovery stage. An editorial article in the `website` column makes the table feel careless even if the entity itself is real.
+Root cause analysis: The primary issue was not architecture but small policy gaps. Config defaults and `.env` still preferred Groq for extraction even after repeated live throttling proved OpenAI was the more stable default for the demo. Pseudo-entity handling relied too much on generic viability signals and not enough on combined name/source/website heuristics. Website normalization focused on URL shape more than website meaning, and `official_site.py` could accidentally bootstrap a directory or article URL into `canonical_domain` by trusting the row's existing `website`.
+What was built or changed:
+
+- `app/core/config.py`, `.env.example`, and `.env`: switched the default demo extractor path to OpenAI while leaving Groq available as an optional alternate/fallback provider.
+- `app/services/field_validator.py`: strengthened `website` semantics so editorial/article/directory/marketplace URLs are rejected as final website values, obvious company-info subpages are canonicalized to the homepage root, and empty is preferred over a semantically wrong website.
+- `app/services/official_site.py`: sanitizes existing website cells before resolution, ignores listing pages as canonical candidates, and replaces semantically worse website values when a likely homepage is found.
+- `app/services/verifier.py`: added a targeted late pseudo-entity filter combining suspicious category-style names, suspicious source/title/path hints, weak actionable evidence, and same-domain listing websites.
+- `app/services/extractor.py`: now passes source URL/title context into website validation so article/listing rejection happens at the extraction boundary too.
+- Tests: updated provider-routing defaults and added regression coverage for pseudo-entity filtering, editorial/directory website rejection, homepage canonicalization, and non-bootstrap official-site behavior.
+- Docs: README now reflects OpenAI as the default demo extractor, Groq as optional, late pseudo-entity filtering, and homepage-first website semantics.
+Why this change was chosen: These were the smallest safe fixes that directly addressed reviewer-facing weaknesses without redesigning the pipeline. The planner, retrieval flow, discovery/fill split, provenance model, ranking, verifier structure, exports, and UI all stay intact; only the default runtime path and the two weak semantic filters were tightened.
+What happened when it was run/tested:
+
+- Targeted regression tests for provider routing, website semantics, official-site resolution, and pseudo-entity filtering: 38/38 passed.
+- Full test suite: 157/157 passed.
+- Startup/provider sanity check after updating `.env`: logs reflected `planner=openai/gpt-4o-mini extractor=openai/gpt-4o-mini`.
+- Live bounded smoke validation on `"AI startups in healthcare"` after the final verifier/website changes: the final saved result no longer contained the pseudo entity id `ai-copilots-agents-for-psychiatry`; top rows remained real startups such as `insilico-medicine`, `freenome`, `tempus`, `pathai`, and `verily`.
+Failures / issues observed: Optional Groq fallback can still appear in logs when OpenAI times out on individual calls and Groq is configured as the secondary provider; if Groq is throttled at the same time, latency still rises. Official-site resolution remains conservative and will sometimes leave `website` blank rather than guessing. The pseudo-entity filter is heuristic and may still miss subtler category artifacts in other domains.
+What was fixed immediately: Reviewer runs now default to OpenAI extraction instead of starting with a provider that is known to 429 on the demo workload. Obvious category/list labels are removed from final rows. Final `website` cells now prefer canonical homepages and reject article/directory values unless there is no better official candidate.
+What was deferred: No startup-time provider health check was added, and there is still no broader canonical-domain enrichment pass beyond the existing heuristic resolver. The pseudo-entity rules remain deliberately targeted rather than becoming a large classifier.
+Resulting improvement: The demo runtime path is more stable, final rows are more trustworthy, and the `website` column now matches normal reviewer expectations. These changes improve semantic correctness and reduce the kinds of artifacts that make a near-finished project look unreliable.
+Tradeoffs introduced: OpenAI-first extraction is generally slower and can cost more than an ideal healthy Groq run. Website cells may be empty more often because the system now refuses semantically wrong URLs. The pseudo-entity rule is intentionally conservative, so some borderline category-like labels may still be downranked rather than always deleted.
+Files/modules affected: `app/core/config.py`, `.env`, `.env.example`, `app/services/llm.py`, `app/services/extractor.py`, `app/services/field_validator.py`, `app/services/source_quality.py`, `app/services/official_site.py`, `app/services/verifier.py`, `README.md`, `docs/BUILD_JOURNAL.md`, `tests/test_provider_routing.py`, `tests/test_extractor.py`, `tests/test_field_validator.py`, `tests/test_official_site.py`, `tests/test_verifier.py`.
+Next step: Improve canonical-domain recall without weakening the stricter homepage semantics, and consider lightweight startup/provider health telemetry so the demo can surface degraded secondary-provider behavior more explicitly.
+
+---
+
 ## Overall Progress Summary
 
 **Phase 1 (Iterations 1–2) — Reliability:**  
@@ -1202,8 +1240,11 @@ Broad discovery queries regressed to zero rows because Groq extraction 429s were
 **Phase 14 (Iteration 21) — Simplification for Recall and Stability:**  
 Added lightweight query normalization, constrained query-family planning, discovery-first extraction, canonical/official-site resolution, official-site-aware focused fill, softer late filtering, and expanded evaluation metrics. Live validation: "top pizza places in Brooklyn" returned 31 final rows from 115 discovered candidates / 56 merged rows, and "AI startups in healthcare" returned 31 final rows from 157 discovered candidates / 130 merged rows. Tests increased to 150 passing.
 
+**Phase 15 (Iteration 22) — Demo Hardening and Semantic Cleanup:**  
+Reverted the default demo extractor path to OpenAI, added a targeted late pseudo-entity filter for list/category artifacts, and tightened website semantics so final `website` values prefer canonical homepages over article or directory URLs. Validation: 157/157 tests passing, startup logs confirmed `planner=openai ... extractor=openai ...`, and the final saved healthcare smoke-test result no longer contained the pseudo row `ai-copilots-agents-for-psychiatry`.
+
 **Remaining gaps:**  
-No ground-truth labels — metrics are proxy signals, not precision/recall. Fallback behavior now protects against empty results, but it can trade correctness for latency/cost when the primary provider is degraded (see Known Limitation #9 and #13).
+No ground-truth labels — metrics are proxy signals, not precision/recall. The OpenAI-first demo path is more stable, but optional secondary-provider fallback can still trade latency/cost for correctness preservation when the primary provider is degraded (see Known Limitation #6 and #9).
 
 ---
 
@@ -1443,6 +1484,36 @@ No ground-truth labels — metrics are proxy signals, not precision/recall. Fall
 
 ---
 
+### Issue: Reviewer demo still defaulted to Groq despite repeated throttling
+
+**Detected in:** Iteration 22, startup log audit + live smoke validation  
+**Symptoms:** Runtime still started with `extractor=groq/...`, Groq 429s appeared early in extraction, and OpenAI fallback was rescuing many pages anyway.  
+**Root cause:** Config defaults and local demo env still pointed `EXTRACTOR_PROVIDER` at Groq, even after prior traces showed OpenAI was the more stable reviewer-facing default.  
+**Fix:** Switched default extractor routing to OpenAI in config and env docs, while keeping Groq as an optional alternate/fallback provider.  
+**Status:** Resolved.
+
+---
+
+### Issue: Category/list labels could survive as final entity rows
+
+**Detected in:** Iteration 22, `"AI startups in healthcare"` live trace  
+**Symptoms:** A row like `"AI Copilots & Agents for Psychiatry"` appeared in final output even though it was a category/list label, not a company.  
+**Root cause:** Existing late filtering focused on marketplace/thin-evidence rows and did not combine suspicious name patterns with source/listing heuristics strongly enough.  
+**Fix:** Added a targeted pseudo-entity rule in `verifier.py` that combines category-style names, suspicious source/title/path hints, weak actionable evidence, and non-entity website behavior.  
+**Status:** Resolved for the observed patterns; remains heuristic by design.
+
+---
+
+### Issue: `website` field could contain article or directory URLs
+
+**Detected in:** Iteration 22, website audit during smoke/debug review  
+**Symptoms:** Final `website` cells could point to editorial articles, blog posts, or listing roots instead of the entity's homepage.  
+**Root cause:** `field_validator.py` validated URL structure but not website meaning, and `official_site.py` could trust an existing website cell too early when deriving canonical domains.  
+**Fix:** Strengthened website normalization/acceptance rules, passed source URL/title context into website validation, sanitized existing website cells before canonical resolution, and prevented directory/article URLs from bootstrapping `canonical_domain`.  
+**Status:** Resolved for the targeted failure modes.
+
+---
+
 ## Before vs After Improvements
 
 ### Improvement: Pipeline completion reliability
@@ -1501,6 +1572,22 @@ No ground-truth labels — metrics are proxy signals, not precision/recall. Fall
 
 ---
 
+### Improvement: Reviewer-facing runtime stability
+
+**Before:** The demo still started extraction on Groq by default, so repeated 429 recovery made runs look fragile and slower than necessary even when OpenAI fallback preserved correctness.  
+**After:** The default demo path now uses OpenAI for both planning and extraction, with Groq left as an optional alternate/fallback path instead of the primary runtime.  
+**What caused improvement:** Iteration 22 provider default change.
+
+---
+
+### Improvement: Final-row semantic correctness
+
+**Before:** Category/list labels could survive as rows, and `website` could point to editorial articles or directory roots rather than an entity homepage.  
+**After:** Late pseudo-entity filtering removes obvious category artifacts, and website validation/canonical resolution now prefer official homepages while rejecting article/directory values.  
+**What caused improvement:** Iteration 22 pseudo-entity + website semantics fixes.
+
+---
+
 ## Current Architecture
 
 ### Pipeline stages (in order)
@@ -1514,7 +1601,7 @@ POST /api/search
 3. brave_search.py     — parallel Brave API calls (facet queries × 5 results), URL dedup
 4. scraper.py          — async fetch (semaphore=5), trafilatura→BS4, SQLite cache (24h TTL)
 5. reranker.py         — cross-encoder rerank (ms-marco-MiniLM-L-6-v2) or Jaccard fallback
-6. extractor.py        — discovery-mode extraction per page/chunk; provider fallback on failure
+6. extractor.py        — discovery-mode extraction per page/chunk; OpenAI-first demo path with optional provider fallback
 7. merger.py           — rapidfuzz + domain dedup, best-confidence cell wins, lookup refresh
 8. official_site.py    — canonical/official-site resolution from explicit fields and page signals
 9. rank_rows()         — completeness(0.25) + confidence(0.20) + source_quality(0.32)
@@ -1534,18 +1621,18 @@ POST /api/search
 | `planner.py`           | Claude        | Stable     | Constrained families + schema templates; avoids generic planner drift                              |
 | `brave_search.py`      | Claude        | Stable     | 15–25 unique URLs typical                                                                         |
 | `scraper.py`           | Claude        | Stable     | trafilatura handles most pages; JS-rendered pages skipped                                         |
-| `extractor.py`         | Claude + user | Stable     | Discovery + fill modes, chunk semaphore, provider fallback                                        |
+| `extractor.py`         | Claude + user | Stable     | Discovery + fill modes, chunk semaphore, OpenAI-first demo path, optional provider fallback       |
 | `merger.py`            | Claude + user | Stable     | Lookup refresh fix applied                                                                        |
-| `official_site.py`     | Claude        | Functional | Conservative heuristic resolver; useful but not exhaustive                                        |
+| `official_site.py`     | Claude        | Functional | Conservative heuristic resolver; now sanitizes bad website cells before attaching canonical sites  |
 | `ranker.py`            | Claude + user | Stable     | 6-component score; early prune softened in Iteration 21                                           |
 | `reranker.py`          | Claude        | Stable     | Cross-encoder ms-marco-MiniLM-L-6-v2 + Jaccard fallback                                           |
 | `cell_verifier.py`     | Claude        | Stable     | Three-rule alignment, 0.6× penalty                                                                |
-| `field_validator.py`   | Claude        | Stable     | URL/phone/rating normalization at extraction boundary                                             |
+| `field_validator.py`   | Claude        | Stable     | URL/phone/rating normalization; website semantics reject article/directory URLs                    |
 | `gap_fill.py`          | Claude + user | Functional | Focused fill now prefers official/about/contact pages first                                       |
 | `source_quality.py`    | User          | Functional | Domain lists hand-curated; food/startup-biased                                                    |
-| `verifier.py`          | User          | Functional | Late filter; much less aggressive than the earlier precision-first configuration                  |
+| `verifier.py`          | User          | Functional | Late filter; now also removes obvious pseudo-entity/category-label rows                           |
 | `exporter.py`          | Claude        | Stable     | JSON + CSV with per-column provenance                                                             |
-| `llm.py`               | Claude + user | Stable     | Dual-provider pool (OpenAI planner + Groq extractor), markdown fence extraction, 60s timeout      |
+| `llm.py`               | Claude + user | Stable     | Dual-provider pool (OpenAI demo default; Groq optional alternate/fallback), markdown fence extraction, 60s timeout |
 
 ### What is stable
 
@@ -1560,6 +1647,7 @@ POST /api/search
 ### What is still weak
 
 - **Official-site resolution recall:** `official_site.py` is intentionally conservative and still misses many rows that really do have a canonical website
+- **Pseudo-entity heuristics:** obvious category/list artifacts are now filtered late, but subtler taxonomy phrases may still slip through or be merely downranked
 - **Cell-level entity consistency:** mostly mitigated by `cell_verifier.py`, but short entity names can still false-match on fuzzy `partial_ratio`
 - **JS-rendered pages:** SPAs return empty content — skipped by `_MIN_TEXT_LENGTH` threshold
 - **Source domain lists:** `source_quality.py` is calibrated for food/startup queries; other domains get neutral `unknown` score
@@ -1591,13 +1679,13 @@ POST /api/search
 
 5. ~~**No URL validation:**~~ **Resolved** — `field_validator.py` (Iteration 10) rejects bare words without TLDs, normalizes scheme/host/trailing-slash.
 
-6. **Latency:** 20–60s is still typical on a healthy primary extractor. Under Groq throttling, fallback-heavy runs can exceed 100s because discovery and fill both retry on OpenAI rather than failing closed.
+6. **Latency:** 25–60s is still typical on the default OpenAI demo path. If an optional secondary provider is enabled and fallback is exercised, discovery and fill can still take longer.
 
 7. **Single-round focused fill:** Entities still sparse after one enrichment round remain sparse. A second round would improve completeness at doubled cost.
 
 8. **No query caching:** Re-running the same query re-executes the full pipeline. Only page scraping is cached.
 
-9. **Groq rate limits:** Groq's free tier has per-minute request and token caps. Iteration 20 added extractor fallback to OpenAI so broad queries no longer collapse to zero rows, but sustained Groq throttling now shows up as higher latency and higher secondary-provider cost instead of empty output.
+9. **Optional Groq rate limits:** Groq is no longer the default demo extractor, but if you enable it as an alternate/fallback provider its free tier still has per-minute request and token caps. Sustained Groq throttling now shows up as higher latency and higher recovery cost instead of empty output.
 
 10. **Llama JSON reliability:** Llama 3.3 models occasionally wrap valid JSON in markdown code fences even with `json_object` response format. The `_extract_json()` fallback handles this, but very complex schemas may still produce parse failures more often than GPT-4o-mini.
 
@@ -1608,3 +1696,5 @@ POST /api/search
 13. **Silent planner fallback:** `plan_schema()` catches all exceptions from LLM schema inference and falls back to a generic plan. This is intentional for resilience, but it masks permanent configuration errors (e.g., Iteration 19's required-field bug ran silently for an unknown number of queries). The fallback only logs at WARNING and does not currently surface structured planner-fallback metadata to the client.
 
 14. **Official-site heuristics are conservative:** Canonical-domain resolution only fires when the page/domain signals look strong. This avoids attaching the wrong website, but it also means many valid rows still rely on editorial/directory evidence instead of an explicit official-site match.
+
+15. **Homepage semantics prefer blank over wrong:** The stricter `website` rules now reject article/blog/directory URLs as final websites. This improves trust, but it also means some real entities will show no website until a cleaner canonical homepage can be resolved.

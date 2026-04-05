@@ -138,11 +138,11 @@ templates/
 static/
   app.js               # Vanilla JS: polling, phase tracker, panels, table with trust badges, modal
   style.css            # Dark theme, responsive, pipeline tracker, badge system
-tests/                 # pytest test suite (150 tests)
+tests/                 # pytest test suite (157 tests)
 scripts/
   eval.py              # Evaluation harness (CLI)
 docs/
-  BUILD_JOURNAL.md     # Full development journal (21 iterations)
+  BUILD_JOURNAL.md     # Full development journal (22 iterations)
   eval_queries.json    # Eval query set (10 queries, 3 categories)
 data/                  # Eval reports (created at runtime)
 ```
@@ -173,7 +173,7 @@ Broad entity-discovery queries are handled in two passes. First, the extractor r
 
 ### 4. Official-site resolution
 
-After candidate merge, the pipeline tries to resolve canonical domains from explicit website cells and from high-confidence official-looking pages. When resolved, these domains are preferred during attribute filling and improve trust for fields like website, address, phone, and company facts.
+After candidate merge, the pipeline tries to resolve canonical domains from explicit website cells and from high-confidence official-looking pages. When resolved, these domains are preferred during attribute filling and improve trust for fields like website, address, phone, and company facts. Final `website` values prefer canonical homepages and leave the field empty rather than stuffing in an article or directory URL.
 
 ### 5. Fuzzy entity deduplication
 
@@ -189,7 +189,7 @@ Every row is scored on the trustworthiness of its evidence sources, not just ext
 
 ### 7. Evidence-based row verification
 
-Before final ranking, a verifier pass removes rows that would not be useful to a user. For strict queries ("top", "best", "leading"), marketplace-only rows are dropped. Rows with very low source quality and few cells are also filtered. The verifier always falls back to the original set if everything would be removed.
+Before final ranking, a verifier pass removes rows that would not be useful to a user. For strict queries ("top", "best", "leading"), marketplace-only rows are dropped. Late pseudo-entity filtering also removes obvious category/list artifacts that look like labels rather than companies or places. Rows with very low source quality and few cells are also filtered. The verifier always falls back to the original set if everything would be removed.
 
 ### 8. Cross-encoder reranking
 
@@ -203,7 +203,7 @@ After merge and again after gap-fill, every cell is checked for entity alignment
 
 Before cells enter the pipeline, a rule-based validator normalizes and filters by column type:
 
-- **Website**: adds `https://`, validates TLD presence, rejects bare words like `robertaspizza`
+- **Website**: adds `https://`, validates TLD presence, canonicalizes homepage-like company URLs to the site root, and rejects editorial/article/directory URLs as final website values
 - **Phone**: requires ≥7 digits
 - **Rating**: requires a number in [0, 10]
 
@@ -247,18 +247,18 @@ cp .env.example .env
 | Variable             | Required | Description                                                |
 | -------------------- | -------- | ---------------------------------------------------------- |
 | `BRAVE_API_KEY`      | ✅       | From [brave.com/search/api](https://brave.com/search/api/) |
-| `OPENAI_API_KEY`     | ✅       | OpenAI API key (used for planning)                         |
+| `OPENAI_API_KEY`     | ✅       | OpenAI API key (used for planning and default demo extraction) |
 | `OPENAI_MODEL`       | optional | Default: `gpt-4o-mini`                                     |
-| `GROQ_API_KEY`       | ✅       | Groq API key (used for extraction)                         |
+| `GROQ_API_KEY`       | optional | Groq API key (optional alternate/fallback extractor path)  |
 | `GROQ_MODEL`         | optional | Default: `llama-3.3-70b-versatile`                         |
 | `GROQ_BASE_URL`      | optional | Default: `https://api.groq.com/openai/v1`                  |
 | `PLANNER_PROVIDER`   | optional | Default: `openai` — which provider the planner uses        |
-| `EXTRACTOR_PROVIDER` | optional | Default: `groq` — which provider the extractor uses        |
+| `EXTRACTOR_PROVIDER` | optional | Default: `openai` — which provider the extractor uses      |
 | `OPENAI_BASE_URL`    | optional | For non-OpenAI providers                                   |
 | `APP_ENV`            | optional | `development` or `production`                              |
 | `LOG_LEVEL`          | optional | `INFO` (default) or `DEBUG`                                |
 
-The system uses a **split-provider** model: OpenAI handles schema planning (higher reliability for structured reasoning) while Groq handles entity extraction (faster inference for bulk page processing). Both providers use the same OpenAI-compatible client internally. If the primary extractor provider fails and another configured provider is available, extraction retries on the secondary provider instead of silently returning zero entities.
+The system uses a **dual-provider** model with an OpenAI-first demo path: OpenAI handles schema planning and is also the default extractor provider for reviewer-facing runs. Groq remains supported as an optional alternate/fallback extractor path through the same OpenAI-compatible client wrapper. If the configured primary extractor provider fails and another configured provider is available, extraction retries on the secondary provider instead of silently returning zero entities.
 
 ---
 
@@ -420,7 +420,7 @@ Returns `{ "status": "ok" }`.
 
 **Discovery and filling are separate responsibilities**: Candidate discovery is optimized for recall; attribute filling is optimized for completeness and provenance. Keeping them separate is simpler and more stable than forcing one extraction pass to do both jobs.
 
-**Extractor provider fallback**: Broad discovery queries should not collapse to zero rows just because one extraction provider is rate-limited. The extractor tries the configured primary provider first and retries on a configured secondary provider when needed. This favors correctness over minimum latency.
+**Extractor provider fallback**: Broad discovery queries should not collapse to zero rows just because one extraction provider is rate-limited. The demo now defaults extraction to OpenAI for runtime stability, while still allowing a configured secondary provider such as Groq to serve as an alternate/fallback path. This favors correctness and predictable reviewer runs over minimum latency.
 
 **Ranker design**: The ranking formula is a weighted sum of six interpretable signals: completeness (0.25), average confidence (0.20), source quality (0.32), source support (0.08), actionable-field bonus (0.07), and source diversity (0.08). Source quality dominates by design. More complex ranking (BM25 against query, embedding similarity) was intentionally omitted — the signals are already well-correlated with quality and remain fully explainable.
 
@@ -430,8 +430,8 @@ Returns `{ "status": "ok" }`.
 
 - **LLM hallucination**: Despite strong prompt constraints, the extractor may occasionally assign `confidence > 0` to values weakly implied by context. The evidence snippet requirement and cell-level verification reduce this but do not eliminate it.
 - **Dynamic pages**: JavaScript-rendered pages (SPAs) are not scraped; the system fetches static HTML only. This misses some sources.
-- **Rate limits**: Running many queries quickly may hit Brave or Groq rate limits (depends on your plan). When Groq throttles, extraction can fall back to OpenAI if configured, which preserves results but increases latency and cost.
-- **Latency**: A typical query takes 15–45 seconds with Groq extraction (25–60s with OpenAI extraction) depending on page count, reranking, and LLM speed. The cross-encoder adds ~1-2s; gap-fill adds 10–20s. Extractor fallback during provider throttling can push latency higher.
+- **Rate limits**: Running many queries quickly may hit Brave or OpenAI limits depending on your plan. Groq is no longer the default demo extractor because its free tier can throttle unpredictably; if you enable it as an alternate/fallback path, provider recovery can still increase latency and cost.
+- **Latency**: A typical query takes about 25–60 seconds on the default OpenAI demo path depending on page count, reranking, and gap-fill. Optional Groq use can be faster when healthy, but fallback recovery during provider throttling can push latency higher.
 - **Schema quality**: Constrained planning sharply reduced generic schemas, but `fallback_generic` still exists for ambiguous topics and can be weaker than the domain-specific families.
 - **Cell verifier false matches**: Short entity names (e.g. "Joe's") can fuzzy-match against unrelated evidence. The 80-threshold partial_ratio mitigates but does not eliminate this.
 - **Source domain calibration**: `source_quality.py` is calibrated for food/startup queries. Medical, legal, and academic domains get a neutral `unknown` score (0.55).
@@ -451,15 +451,15 @@ Returns `{ "status": "ok" }`.
 
 ## Latency and cost
 
-With the default split-provider setup (`gpt-4o-mini` planner + `llama-3.3-70b-versatile` extractor) and 15 scraped pages:
+With the default demo setup (`gpt-4o-mini` planner + `gpt-4o-mini` extractor) and 15 scraped pages:
 
 - Planner: ~0.3–1.0s
 - Extractor: ~0.5–1.5s per page, ~1500 tokens per chunk — the dominant cost
 - Gap-fill: adds ~10–25s and up to 5 focused entity fills for sparse rows
 
-Groq provides significantly faster extraction inference than hosted OpenAI models, but its free tier may apply stricter rate limits. Estimated token cost per query is still **~30k–80k tokens**. When extractor fallback to OpenAI is triggered, total latency and spend rise, but broad queries continue to return rows instead of failing closed with empty output.
+Estimated token cost per query is still **~30k–80k tokens**. The OpenAI-first demo path avoids Groq 429 recovery loops at the cost of somewhat slower extraction than an ideal healthy Groq run.
 
-With OpenAI fallback (`gpt-4o-mini`): similar token counts, ~$0.01–$0.03 per query.
+If Groq is enabled as an alternate/fallback extractor, it can be faster when healthy, but provider throttling can increase total latency and secondary-provider spend. With `gpt-4o-mini`, typical extraction spend remains in the ~$0.01–$0.03 per query range.
 
 ---
 
