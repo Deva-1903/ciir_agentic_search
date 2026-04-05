@@ -109,9 +109,10 @@
         <div class="no-results-title">No entities found</div>
         <p class="no-results-query" id="no-results-query"></p>
         <p class="no-results-hint">
-          The pipeline completed but could not extract confident entities. Try a
-          more specific topic, e.g. &ldquo;best pizza restaurants in
-          Manhattan&rdquo; rather than &ldquo;food&rdquo;.
+          The pipeline completed, but no stable candidates survived final
+          ranking and verification. Try adding a clearer entity type or
+          location, e.g. &ldquo;best pizza restaurants in Manhattan&rdquo;
+          rather than &ldquo;food&rdquo;.
         </p>
       </div>
 
@@ -197,8 +198,8 @@
           <h2>How it works</h2>
           <ol class="how-it-works">
             <li>
-              <strong>Plan</strong> — LLM infers entity type, schema columns,
-              and typed retrieval facets
+              <strong>Normalize &amp; Type</strong> — Clean the query, classify
+              its family, and choose a constrained schema
             </li>
             <li>
               <strong>Search &amp; Scrape</strong> — Multi-angle web search via
@@ -209,16 +210,16 @@
               query-relevant pages for extraction
             </li>
             <li>
-              <strong>Extract</strong> — LLM extracts structured entities with
-              per-cell evidence and confidence
+              <strong>Discover</strong> — Extract broad candidate entities
+              first, then fill missing attributes later
             </li>
             <li>
-              <strong>Merge &amp; Verify</strong> — Fuzzy dedup, cell-level
-              verification, source-quality scoring, gap-fill
+              <strong>Canonicalize</strong> — Merge duplicates and prefer
+              official or canonical sources when they can be resolved
             </li>
             <li>
-              <strong>Rank</strong> — 6-component weighted ranker: completeness,
-              confidence, source quality, diversity, and more
+              <strong>Rank &amp; Verify</strong> — Score by evidence, source
+              quality, support, and diversity; prune obvious junk late
             </li>
           </ol>
         </div>

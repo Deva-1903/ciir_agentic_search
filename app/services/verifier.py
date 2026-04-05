@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from app.core.logging import get_logger
 from app.models.schema import EntityRow, PlannerOutput
-from app.services.ranker import is_row_viable
+from app.services.ranker import is_row_obviously_bad
 from app.services.source_quality import row_source_profile, row_source_quality
 
 log = get_logger(__name__)
@@ -29,7 +29,7 @@ def _count_actionable_fields(row: EntityRow) -> int:
 
 
 def _verify_row(row: EntityRow, plan: PlannerOutput, query: str) -> tuple[bool, str]:
-    if not is_row_viable(row, plan):
+    if is_row_obviously_bad(row, plan):
         return False, "not_viable"
 
     strict_query = _query_is_strict(query)
@@ -48,11 +48,10 @@ def _verify_row(row: EntityRow, plan: PlannerOutput, query: str) -> tuple[bool, 
     if strict_query and marketplace_only:
         return False, "marketplace_only"
 
-    if source_quality < 0.3 and len(row.cells) < 4:
+    # Keep sparse but plausible rows alive and let ranking sort them.
+    # Only hard-reject when the row is both weak and unsupported.
+    if source_quality < 0.2 and actionable_fields == 0 and row.sources_count < 2:
         return False, "low_quality_sparse"
-
-    if strict_query and source_quality < 0.45 and actionable_fields < 2:
-        return False, "strict_query_weak_evidence"
 
     return True, "ok"
 

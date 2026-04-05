@@ -30,14 +30,20 @@ Build a provenance-first entity discovery app for the CIIR Agentic Search Challe
 - **Added (user):** `cell_verifier.py` — per-cell entity-alignment penalty (evidence/title/domain match)
 - **Added (user):** `field_validator.py` — URL/phone/rating normalization at extraction boundary
 - **Added (user):** `_source_diversity()` in ranker — penalises single-domain rows (0.08 weight)
-- **Added (user):** `scripts/eval.py` + `docs/eval_queries.json` — CLI evaluation harness with 10 queries, 7 metrics
+- **Added (user):** `scripts/eval.py` + `docs/eval_queries.json` — CLI evaluation harness with 10 queries; later expanded with actionable-field and official-site metrics
 - **Rebuilt (user):** UI — phase tracker, retrieval plan panel, quality controls panel, trust badges, run stats, enhanced modal, empty/error states
 - **Added (user):** Groq as primary LLM provider, OpenAI fallback, `_extract_json` markdown fence handling
 - **Fixed (user):** zero-entity regression — Groq decommissioned `llama-3.1-70b-versatile`; updated to `llama-3.3-70b-versatile`
 - **Added (user):** 0-entity safeguard log in pipeline — detects likely systemic extraction failure
 - **Split (user):** dual-provider routing — planner→OpenAI (gpt-4o-mini), extractor→Groq (llama-3.3-70b-versatile)
 - **Fixed (Claude):** broad-query zero-result regression — Groq extractor 429s now retry on OpenAI; added `pipeline_counts` metadata and stage-count logging
-- **Current state:** full 11+-stage pipeline (incl. reranker, cell verifier ×2), split-provider LLM (OpenAI planner + Groq extractor with OpenAI fallback on extraction failure), dark-theme UI with phase tracker, query echo, trust badges, quality panels, per-cell evidence modal with confidence badges, JSON/CSV export. **Planner silent fallback regression fixed** — `PlannerOutput.search_angles` default restored, planner now returns domain-specific entity types, columns, and typed facets on every query.
+- **Added (Claude):** `query_normalizer.py` — safe query cleanup with bounded typo/location fixes and original/normalized query metadata
+- **Reworked (Claude):** `planner.py` — constrained query-family planning (`local_business`, `startup_company`, `software_tool`, `organization`, etc.) with schema templates instead of free-form generic schemas
+- **Reworked (Claude):** `extractor.py` into discovery + fill modes so candidate recall is separated from attribute completion
+- **Added (Claude):** `official_site.py` — canonical/official-site resolution as a first-class step before focused fill
+- **Softened (Claude):** early prune/verifier behavior — more rows survive to ranking and late verification
+- **Expanded (Claude):** evaluation metrics — actionable-field rate, official-site rate, normalized query/query-family metadata
+- **Current state:** normalized-query, discovery-first pipeline with constrained planning, typed retrieval facets, candidate merge, official-site resolution, focused fill, late verification, per-cell provenance, async jobs, exports, evaluation harness, and reviewer-facing UI. Split-provider LLM remains (OpenAI planner + Groq extractor with OpenAI fallback), but the retrieval story is now simpler and higher-recall than the earlier brittle single-pass extraction flow.
 
 ---
 
@@ -1040,46 +1046,48 @@ Wrote a Python script confirming that `PlannerOutput.model_validate({"entity_typ
 
 **Fix applied:**
 
-| File                 | Change                                                                          |
-| -------------------- | ------------------------------------------------------------------------------- |
+| File                   | Change                                                                                |
+| ---------------------- | ------------------------------------------------------------------------------------- |
 | `app/models/schema.py` | `search_angles: List[str]` → `search_angles: List[str] = Field(default_factory=list)` |
 
 One-line change. The field now defaults to `[]` if the LLM omits it (which it always does), and the post-validation derivation from facets populates it correctly.
 
 **Tests added:**
 
-| Test file               | Test name                                                    | Purpose                                         |
-| ----------------------- | ------------------------------------------------------------ | ----------------------------------------------- |
-| `tests/test_planner.py` | `test_planner_output_validates_without_search_angles`        | Core regression test — validates without field   |
-| `tests/test_planner.py` | `test_planner_output_validates_with_search_angles`           | Backward compat — validates with field present   |
-| `tests/test_extractor.py` | `test_extract_from_chunk_preserves_multiple_entities`      | Verifies all entities from multi-entity response |
-| `tests/test_extractor.py` | `test_extract_from_pages_accumulates_across_pages`         | Verifies cross-page accumulation (extend, not overwrite) |
+| Test file                 | Test name                                             | Purpose                                                  |
+| ------------------------- | ----------------------------------------------------- | -------------------------------------------------------- |
+| `tests/test_planner.py`   | `test_planner_output_validates_without_search_angles` | Core regression test — validates without field           |
+| `tests/test_planner.py`   | `test_planner_output_validates_with_search_angles`    | Backward compat — validates with field present           |
+| `tests/test_extractor.py` | `test_extract_from_chunk_preserves_multiple_entities` | Verifies all entities from multi-entity response         |
+| `tests/test_extractor.py` | `test_extract_from_pages_accumulates_across_pages`    | Verifies cross-page accumulation (extend, not overwrite) |
 
 All 141 tests pass (137 original + 4 new).
 
 **Live validation — "AI startups in healthcare":**
 
-| Metric              | Before (fallback)         | After (fixed planner)                                              |
-| ------------------- | ------------------------- | ------------------------------------------------------------------ |
-| `entity_type`       | `"entity"` (generic)      | `"startup"` (domain-specific)                                      |
-| `columns`           | `name, website, description, category, location` | `name, founders, funding, headquarters, focus_area, website` |
-| `facets`            | 3 generic paraphrase facets | 5 typed facets (entity_list, official_source, editorial_review, news_recent, comparison) |
-| `entities_extracted`| 1                          | 93                                                                 |
-| `entities_after_merge` | 1                       | 82                                                                 |
-| `pages_scraped`     | ~8                         | 8                                                                  |
-| `urls_considered`   | ~13                        | 12                                                                 |
+| Metric                 | Before (fallback)                                | After (fixed planner)                                                                    |
+| ---------------------- | ------------------------------------------------ | ---------------------------------------------------------------------------------------- |
+| `entity_type`          | `"entity"` (generic)                             | `"startup"` (domain-specific)                                                            |
+| `columns`              | `name, website, description, category, location` | `name, founders, funding, headquarters, focus_area, website`                             |
+| `facets`               | 3 generic paraphrase facets                      | 5 typed facets (entity_list, official_source, editorial_review, news_recent, comparison) |
+| `entities_extracted`   | 1                                                | 93                                                                                       |
+| `entities_after_merge` | 1                                                | 82                                                                                       |
+| `pages_scraped`        | ~8                                               | 8                                                                                        |
+| `urls_considered`      | ~13                                              | 12                                                                                       |
 
 The fixed planner produces a domain-specific entity type, meaningful columns, and typed facets that generate better Brave search queries. The extractor, receiving instructions to find `startup` entities with specific columns, returns 93 entities from the same number of pages.
 
 **Why this was hard to find:**
-The fallback was designed for graceful degradation — the pipeline still produced results (just worse ones). No error was logged at WARNING or above; only a DEBUG-level catch in `plan_schema()` fired. The `search_angles` field was derived from facets *after* validation, but adding it to the Pydantic model as required meant validation always failed *before* the derivation could run.
+The fallback was designed for graceful degradation — the pipeline still produced results (just worse ones). No error was logged at WARNING or above; only a DEBUG-level catch in `plan_schema()` fired. The `search_angles` field was derived from facets _after_ validation, but adding it to the Pydantic model as required meant validation always failed _before_ the derivation could run.
 
 **Tradeoffs:**
+
 - The fix makes `search_angles` optional at the Pydantic layer. If future code depends on `search_angles` being populated at validation time (before post-processing), it would find an empty list. This is acceptable because the field is always populated immediately after validation.
 
 ---
 
 ### Iteration 20 - Fixing zero-entity completion regression on broad queries
+
 Date: 2026-04-04
 Goal: Find why broad discovery queries like "top pizza places in Brooklyn" completed with zero final rows, restore sane output quality, and add enough observability to prove the failure stage quickly next time.
 Initial assumption: The most likely failure was somewhere between reranking and verification, but the first step was to prove whether rows were being extracted and filtered later or whether extraction itself had already collapsed.
@@ -1088,25 +1096,65 @@ How it manifested: `scripts/smoke_test.py` against the live `/api/search` route 
 Why the old behavior was insufficient: `extractor.py` caught every LLM exception per page and converted it to `[]`. When the primary extractor provider fails systematically, the pipeline still "completes" and downstream stages see empty input, which makes the UI look like the query was bad instead of the extraction provider failing.
 Root cause analysis: The split-provider routing from Iteration 15 sent all extraction calls to Groq. On the live pizza trace every Groq extraction call failed with HTTP 429 `rate_limit_exceeded` on `llama-3.3-70b-versatile`. A one-page sanity check using the same prompt/parser but forcing `provider="openai"` returned 15 pizza entities immediately, proving the prompt, parser, aggregation, and merge logic were not the problem. The first true collapse was therefore: Groq 429s -> extractor swallows exception -> empty draft list -> merge/prune/verifier never see rows. Backend JSON was genuinely empty, so the UI banner was correct and not itself the bug.
 What was built or changed:
+
 - `app/services/extractor.py`: added ordered extractor-provider fallback logic. Extraction now tries the configured primary provider first, then retries the same chunk on a configured secondary provider instead of returning `[]` immediately.
 - `app/services/extractor.py`: added optional extraction stats counters (`llm_calls_attempted`, `provider_fallback_attempts`, `provider_fallback_successes`, `chunks_seen`, `pages_seen`, `pages_with_entities`).
 - `app/api/routes_search.py`: added `pipeline_counts` tracking for search angles, facets, deduped URLs, scraped pages, reranked pages, extraction calls, merge/prune/verifier counts, and final rows. Also added a warning when extracted entities exist but final rows end up at zero.
 - `app/models/schema.py`: extended `SearchMetadata` with `pipeline_counts`.
 - `scripts/smoke_test.py`: now prints `pipeline_counts` for quick regression tracing.
 - `tests/test_extractor.py`: added a regression test proving extractor fallback from Groq to OpenAI on provider failure.
-Why this fix was chosen: The prompt/parser path was already proven healthy when run through OpenAI, so the smallest safe fix was to repair provider-failure handling rather than redesign extraction or loosen quality filters. This keeps existing planner, reranker, merge, prune, and verifier behavior intact while preventing a transient or quota-based provider outage from being silently reinterpreted as "no entities found."
-What happened when it was run/tested:
+  Why this fix was chosen: The prompt/parser path was already proven healthy when run through OpenAI, so the smallest safe fix was to repair provider-failure handling rather than redesign extraction or loosen quality filters. This keeps existing planner, reranker, merge, prune, and verifier behavior intact while preventing a transient or quota-based provider outage from being silently reinterpreted as "no entities found."
+  What happened when it was run/tested:
 - Live route, before fix, `"top pizza places in Brooklyn"`: `rows=0`, `pages_after_rerank=10`, `entities_extracted=0`.
 - Live route, after fix, `"top pizza places in Brooklyn"`: `rows=30`, `entities_extracted=102`, `rows_after_merge=53`, `rows_after_verifier=30`, `final_rows=30`, `provider_fallback_attempts=15`, `provider_fallback_successes=13`.
 - Live route, after fix, `"AI startups in healthcare"`: `rows=23`, `entities_extracted=24`, `rows_after_merge=23`, `final_rows=23`, `provider_fallback_attempts=14`, `provider_fallback_successes=7`.
 - Full test suite: 142/142 passed.
-Failures / issues observed: Groq remained rate-limited during validation, so extraction latency increased substantially because many chunk calls had to retry on OpenAI. The fix restored correctness and non-zero outputs, but not Groq throughput.
-What was fixed immediately: The extractor now retries on a secondary provider when the primary provider fails, and the response metadata/logs now expose enough counts to pinpoint whether collapse happens at extraction, merge/prune, or verification.
-What was deferred: No startup-time provider health check was added, and Groq-specific error classification still lives only in logs rather than a dedicated structured error channel. The planner's generic fallback behavior also remains as a separate resilience tradeoff.
-Resulting improvement: Broad but valid discovery queries no longer collapse to zero rows just because the primary extractor provider is quota-limited. The pipeline now degrades into a slower secondary-provider extraction path instead of an empty-result path.
-Tradeoffs introduced: Extraction can take noticeably longer and consume secondary-provider budget when Groq is rate-limited. `pipeline_counts` slightly increases response metadata size, but it is compact and useful for debugging.
-Files/modules affected: `app/services/extractor.py`, `app/api/routes_search.py`, `app/models/schema.py`, `scripts/smoke_test.py`, `tests/test_extractor.py`, `docs/BUILD_JOURNAL.md`.
-Next step: Add a bounded provider-health or quota-awareness check so the pipeline can choose the fallback provider earlier, reducing the long extraction stall before fallback succeeds.
+  Failures / issues observed: Groq remained rate-limited during validation, so extraction latency increased substantially because many chunk calls had to retry on OpenAI. The fix restored correctness and non-zero outputs, but not Groq throughput.
+  What was fixed immediately: The extractor now retries on a secondary provider when the primary provider fails, and the response metadata/logs now expose enough counts to pinpoint whether collapse happens at extraction, merge/prune, or verification.
+  What was deferred: No startup-time provider health check was added, and Groq-specific error classification still lives only in logs rather than a dedicated structured error channel. The planner's generic fallback behavior also remains as a separate resilience tradeoff.
+  Resulting improvement: Broad but valid discovery queries no longer collapse to zero rows just because the primary extractor provider is quota-limited. The pipeline now degrades into a slower secondary-provider extraction path instead of an empty-result path.
+  Tradeoffs introduced: Extraction can take noticeably longer and consume secondary-provider budget when Groq is rate-limited. `pipeline_counts` slightly increases response metadata size, but it is compact and useful for debugging.
+  Files/modules affected: `app/services/extractor.py`, `app/api/routes_search.py`, `app/models/schema.py`, `scripts/smoke_test.py`, `tests/test_extractor.py`, `docs/BUILD_JOURNAL.md`.
+  Next step: Add a bounded provider-health or quota-awareness check so the pipeline can choose the fallback provider earlier, reducing the long extraction stall before fallback succeeds.
+
+---
+
+### Iteration 21 - Simplifying the pipeline into a normalized, discovery-first retrieval flow
+
+Date: 2026-04-04
+Goal: Move the project away from a brittle, over-filtered single-pass pipeline and toward a simpler, higher-recall, evaluation-friendly architecture without rebuilding the repo.
+Initial assumption: The zero-entity regression from Iteration 20 was fixed, but broad-query quality was still too dependent on a single extraction pass, free-form planner behavior, and early row viability checks.
+Issue discovered: The repo already had many good components, but they had accreted around a fragile shape: no query normalization, planner freedom that could drift toward generic schemas, extraction doing both discovery and fill in one step, no first-class official-site resolution, and prune/verifier logic that assumed rows should be complete much earlier than a discovery system can safely guarantee.
+How it manifested: Valid broad queries could still be poisoned by light query noise, generic planning, or early low-information filtering. The earlier pipeline also had no explicit place for "candidate discovery first", which made recall heavily dependent on whichever pages and cells happened to survive the first extraction pass.
+Why the old behavior was insufficient: The system had become sophisticated but less stable. It had many quality controls, yet too many of them sat before ranking and focused fill. That made the system more likely to collapse or under-return exactly on the broad discovery queries it was supposed to handle well.
+Root cause analysis: The brittleness was structural, not one bug. Query normalization was missing entirely. Planner output was too unconstrained. Extraction carried both responsibilities (find entities and fill attributes), so any parser, prompt, or provider wobble hit recall directly. Canonical/official sources were only an implicit ranking signal instead of an explicit resolution step. `is_row_viable()`, `prune_rows()`, and `verify_rows()` were tuned more like a precision-first cleaner than a recall-first discovery pipeline.
+What was built or changed:
+
+- `app/services/query_normalizer.py`: added lightweight normalization with safe typo and location cleanup plus `original_query` / `normalized_query` metadata.
+- `app/services/planner.py`: replaced the free-form schema planner with query-family classification and strong schema templates for `local_business`, `startup_company`, `software_tool`, `product_category`, `organization`, and `fallback_generic`.
+- `app/services/extractor.py`: split extraction into `discovery` and `fill` modes so list pages preserve multiple candidate entities before later enrichment.
+- `app/services/official_site.py`: added a practical canonical-site resolver that attaches likely official domains/websites when pages strongly match a candidate.
+- `app/api/routes_search.py`: reordered the pipeline around the new flow: normalize -> constrained plan -> search/scrape/rerank -> discovery extraction -> merge -> official-site resolution -> rank -> focused fill -> late verification -> final prune/rank.
+- `app/services/gap_fill.py`: now prefers canonical/about/contact pages for attribute fill before falling back to fresh search results.
+- `app/services/ranker.py` and `app/services/verifier.py`: softened early hard rejection so plausible rows survive into ranking and late verification; only obvious junk is dropped early.
+- `scripts/eval.py`: expanded run metrics with actionable-field rate, official-site rate, and passthrough of normalized query / query family / pipeline counts.
+- Tests: added regression coverage for query normalization, constrained planning, official-site resolution, and discovery-plan behavior. Total suite: 150 passing tests.
+- Docs/UI: README, BUILD_JOURNAL, and reviewer-facing UI copy updated to tell the simpler normalized-query -> discovery-first -> official-source -> late-filtering story.
+Why this change was chosen: It is the smallest safe evolution that preserves the repo's best engineering pieces: async jobs, provenance, reranking, merge, exports, evaluation harness, tests, and the UI. Instead of adding more orchestration, it reuses the existing modules in a clearer order with fewer hard failure points.
+What happened when it was run/tested:
+
+- Targeted tests for planner/normalizer/official-site/extractor/ranker/verifier/gap-fill/eval: 54 passed.
+- Full test suite: 150/150 passed.
+- Live smoke test, `"top pizza places in Brooklyn"`: 31 final rows, `entities_before_merge=115`, `rows_after_merge=56`, `rows_after_verifier=31`, `final_rows=31`.
+- Live smoke test, `"AI startups in healthcare"`: 31 final rows, `entities_before_merge=157`, `rows_after_merge=130`, `official_sites_resolved=2`, `rows_after_verifier=31`, `final_rows=31`.
+- Live traces showed the first healthy collapse point moved much later in the pipeline: planning/search/discovery/merge all stayed populated, and the final cut happened in late verification instead of at extraction or early prune.
+Failures / issues observed: Groq remained rate-limited during live validation, so many discovery/fill calls fell back to OpenAI and pushed end-to-end latency above 100 seconds. Official-site resolution was intentionally conservative and only resolved a small subset of rows in the live runs.
+What was fixed immediately: Broad-query recall is now protected by normalization, constrained planning, discovery-first extraction, official-site-aware fill, and softer late filtering.
+What was deferred: Official-site resolution could be broadened further, startup-time provider health checks are still absent, and there is still no labeled precision/recall benchmark.
+Resulting improvement: The pipeline is now easier to reason about and materially more stable on broad discovery queries. Good rows survive long enough to be ranked and enriched instead of being filtered out before the system has assembled enough evidence.
+Tradeoffs introduced: More candidates survive longer, which increases downstream work and can raise latency/cost. Official-site resolution is heuristic rather than guaranteed. The planner is intentionally less free-form, so exotic queries may route through `fallback_generic` more often than before.
+Files/modules affected: `app/models/schema.py`, `app/core/config.py`, `app/api/routes_search.py`, `app/services/query_normalizer.py`, `app/services/planner.py`, `app/services/extractor.py`, `app/services/official_site.py`, `app/services/gap_fill.py`, `app/services/ranker.py`, `app/services/verifier.py`, `scripts/eval.py`, `static/app.js`, `templates/index.html`, `README.md`, `docs/BUILD_JOURNAL.md`, `tests/test_planner.py`, `tests/test_query_normalizer.py`, `tests/test_official_site.py`, `tests/test_extractor.py`, `tests/test_provider_routing.py`, `tests/test_eval_metrics.py`.
+Next step: Improve canonical-domain recall and add a small benchmark of labeled cells or rows so late-filtering changes can be judged on precision as well as recall.
 
 ---
 
@@ -1128,7 +1176,7 @@ Replaced paraphrase search angles with typed retrieval facets (`entity_list`, `o
 Added per-cell entity-alignment verification (fuzzy name match in evidence/title/domain), field-type validation at the extraction boundary (URL/phone/rating), and source-diversity scoring in the ranker. Outcome: cross-entity cell contamination penalized rather than silently accepted; malformed values rejected before entering the pipeline; single-domain rows down-ranked.
 
 **Phase 6 (Iteration 11) — Evaluation:**  
-Built a repeatable CLI evaluation harness (`scripts/eval.py`) with 10 queries across food/tech/travel categories. Metrics: rows returned, fill rate, actionable rate, multi-source rate, confidence, source diversity, duration. JSON + CSV output for comparison across runs, tag-based ablation support.
+Built a repeatable CLI evaluation harness (`scripts/eval.py`) with 10 queries across food/tech/travel categories. Metrics now cover rows returned, fill rate, actionable rate, official-site rate, multi-source rate, confidence, source diversity, and duration. JSON + CSV output for comparison across runs, tag-based ablation support.
 
 **Phase 7 (Iteration 12) — UI for Reviewer Impact:**  
 Rewrote the frontend to communicate the pipeline's process and trust signals. Added phase tracker, retrieval plan panel, quality controls panel, run stats panel, row-level trust badges, enhanced evidence modal, and empty/error states. Same tech stack (Jinja2 + vanilla JS + CSS), no framework.
@@ -1150,6 +1198,9 @@ Widened results container to 95vw with sticky header and zebra rows (Iteration 1
 
 **Phase 13 (Iteration 20) — Extraction Provider Fallback + Stage Counts:**  
 Broad discovery queries regressed to zero rows because Groq extraction 429s were being silently converted into empty entity lists. Added extractor-provider fallback (Groq -> OpenAI when configured) and `pipeline_counts` metadata covering search, extraction, merge, prune, verifier, and final-row counts. Live validation: "top pizza places in Brooklyn" went from 0 rows / 0 extracted to 30 final rows / 102 extracted, and "AI startups in healthcare" returned 23 final rows.
+
+**Phase 14 (Iteration 21) — Simplification for Recall and Stability:**  
+Added lightweight query normalization, constrained query-family planning, discovery-first extraction, canonical/official-site resolution, official-site-aware focused fill, softer late filtering, and expanded evaluation metrics. Live validation: "top pizza places in Brooklyn" returned 31 final rows from 115 discovered candidates / 56 merged rows, and "AI startups in healthcare" returned 31 final rows from 157 discovered candidates / 130 merged rows. Tests increased to 150 passing.
 
 **Remaining gaps:**  
 No ground-truth labels — metrics are proxy signals, not precision/recall. Fallback behavior now protects against empty results, but it can trade correctness for latency/cost when the primary provider is degraded (see Known Limitation #9 and #13).
@@ -1213,6 +1264,15 @@ No ground-truth labels — metrics are proxy signals, not precision/recall. Fall
 
 ---
 
+### Decision: Constrained query families over fully free-form planning
+
+**Context:** Free-form planner output drifted toward generic schemas (`entity`, `description`, `location`) and weakened downstream recall.  
+**Why chosen:** A small query-family classifier plus schema templates keeps the pipeline predictable while still allowing typed facet generation and light domain adaptation.  
+**Tradeoffs:** Some unusual queries now route through `fallback_generic` instead of a bespoke one-off schema. This is acceptable because it favors stability over planner creativity.  
+**Status:** Kept and strengthened in Iteration 21.
+
+---
+
 ### Decision: Source quality scoring as a ranking signal
 
 **Context:** Rows from delivery/marketplace pages ranked high due to confident but low-value extractions.  
@@ -1228,6 +1288,15 @@ No ground-truth labels — metrics are proxy signals, not precision/recall. Fall
 **Why chosen:** Better to return imperfect results than nothing. User can see low-quality rows are present and judge accordingly.  
 **Tradeoffs:** Means the verifier is a soft filter, not a hard gate. Low-quality rows can still appear if they are the only rows.  
 **Status:** Kept.
+
+---
+
+### Decision: Rank first, kill late
+
+**Context:** Early prune/verifier checks were removing plausible discovery candidates before official-site resolution and focused fill had a chance to strengthen them.  
+**Why chosen:** Discovery systems degrade more gracefully when ranking absorbs uncertainty early and hard rejection happens later, after evidence has had a chance to accumulate.  
+**Tradeoffs:** More candidates survive longer, which increases downstream work and can surface a little more noise before final verification.  
+**Status:** Strengthened in Iteration 21.
 
 ---
 
@@ -1364,6 +1433,16 @@ No ground-truth labels — metrics are proxy signals, not precision/recall. Fall
 
 ---
 
+### Issue: Broad-query recall was still brittle even after the zero-row bug was fixed
+
+**Detected in:** Iteration 21, architecture audit + live trace review  
+**Symptoms:** The pipeline no longer returned zero rows under provider failure, but broad discovery quality still depended on a free-form planner, a single extraction pass doing both discovery and fill, and early viability checks that could suppress plausible candidates before ranking.  
+**Root cause:** The system had accumulated quality controls around a precision-first shape. Query normalization was absent, planner schemas were too unconstrained, canonical/official sites were not a first-class step, and prune/verifier logic sat too early in the flow.  
+**Fix:** Added lightweight query normalization, constrained query-family planning, discovery-first extraction mode, official-site resolution, official-site-aware fill, softer early viability checks, and later verification/pruning.  
+**Status:** Resolved for the current architecture direction; remaining gaps are now mainly heuristic quality/latency issues rather than structural recall collapse.
+
+---
+
 ## Before vs After Improvements
 
 ### Improvement: Pipeline completion reliability
@@ -1414,6 +1493,14 @@ No ground-truth labels — metrics are proxy signals, not precision/recall. Fall
 
 ---
 
+### Improvement: Broad-query recall stability
+
+**Before:** Broad discovery queries depended too heavily on one extraction pass and on early row viability checks. Small planner drift, query typos, or thin first-pass evidence could remove plausible rows before canonical sources and focused fill had a chance to help.  
+**After:** Query normalization feeds a constrained planner, discovery mode preserves candidate lists first, official-site resolution strengthens later fills, and late verification trims ranked rows instead of choking recall at the front of the pipeline.  
+**What caused improvement:** Iteration 21 normalization + constrained planning + discovery-first extraction + late-filtering refactor.
+
+---
+
 ## Current Architecture
 
 ### Pipeline stages (in order)
@@ -1422,47 +1509,49 @@ No ground-truth labels — metrics are proxy signals, not precision/recall. Fall
 POST /api/search
   │
   ▼
-1. planner.py         — LLM infers entity_type, columns (5–8), typed retrieval facets
-2. brave_search.py    — parallel Brave API calls (facet queries × 5 results), URL dedup
-3. scraper.py         — async fetch (semaphore=5), trafilatura→BS4, SQLite cache (24h TTL)
-3.5 reranker.py       — cross-encoder rerank (ms-marco-MiniLM-L-6-v2) or Jaccard fallback
-4. extractor.py       — LLM extraction per page + field_validator at cell boundary
-                        primary provider first, then configured fallback provider on failure
-5. merger.py          — rapidfuzz + domain dedup, best-confidence cell wins, lookup refresh
-6. prune_rows()       — remove non-viable rows (no name, or name-only with weak columns)
-7. rank_rows()        — completeness(0.25) + confidence(0.20) + source_quality(0.32)
-                        + source_support(0.08) + actionable(0.07) + source_diversity(0.08)
-7.5 cell_verifier.py  — per-cell entity-alignment check, 0.6× confidence penalty
-8. gap_fill.py        — focused queries for top-3 sparse rows, name-verified extraction
-8.5 cell_verifier.py  — second pass after gap-fill
-9. verify_rows()      — marketplace-only filter, source quality threshold, fallback
-10. prune + re-rank   — second cleanup pass with final ordering
-11. complete_job()    — write result JSON + `pipeline_counts` metadata to SQLite
+1. query_normalizer.py — safe query cleanup; preserve original + normalized query
+2. planner.py          — query-family classification + schema template + typed retrieval facets
+3. brave_search.py     — parallel Brave API calls (facet queries × 5 results), URL dedup
+4. scraper.py          — async fetch (semaphore=5), trafilatura→BS4, SQLite cache (24h TTL)
+5. reranker.py         — cross-encoder rerank (ms-marco-MiniLM-L-6-v2) or Jaccard fallback
+6. extractor.py        — discovery-mode extraction per page/chunk; provider fallback on failure
+7. merger.py           — rapidfuzz + domain dedup, best-confidence cell wins, lookup refresh
+8. official_site.py    — canonical/official-site resolution from explicit fields and page signals
+9. rank_rows()         — completeness(0.25) + confidence(0.20) + source_quality(0.32)
+                         + source_support(0.08) + actionable(0.07) + source_diversity(0.08)
+10. gap_fill.py        — fill-mode extraction for top sparse rows; prefer official/about/contact pages
+11. cell_verifier.py   — per-cell entity-alignment check, 0.6× confidence penalty
+12. verify_rows()      — late filter for obvious junk, weak marketplace-only rows, safe fallback
+13. prune + re-rank    — light final cleanup with final ordering
+14. complete_job()     — write result JSON + `pipeline_counts` metadata to SQLite
 ```
 
 ### Module status
 
-| Module               | Author        | Status     | Notes                                                                           |
-| -------------------- | ------------- | ---------- | ------------------------------------------------------------------------------- |
-| `planner.py`         | Claude        | Stable     | Good schema quality on gpt-4o-mini; silent fallback regression fixed (Iter 19)  |
-| `brave_search.py`    | Claude        | Stable     | 15–25 unique URLs typical                                                       |
-| `scraper.py`         | Claude        | Stable     | trafilatura handles most pages; JS-rendered pages skipped                       |
-| `extractor.py`       | Claude + user | Stable     | Semaphore + chunker fix in place; automatic provider fallback added in Iter 20  |
-| `merger.py`          | Claude + user | Stable     | Lookup refresh fix applied                                                      |
-| `ranker.py`          | Claude + user | Stable     | 6-component score; source_quality dominant (0.32), diversity tie-breaker (0.08) |
-| `reranker.py`        | Claude        | Stable     | Cross-encoder ms-marco-MiniLM-L-6-v2 + Jaccard fallback                         |
-| `cell_verifier.py`   | Claude        | Stable     | Three-rule alignment, 0.6× penalty, runs twice                                  |
-| `field_validator.py` | Claude        | Stable     | URL/phone/rating normalization at extraction boundary                           |
-| `gap_fill.py`        | Claude + user | Functional | Entity-focused; residual contamination in edge cases                            |
-| `source_quality.py`  | User          | Functional | Domain lists hand-curated; food/startup-biased                                  |
-| `verifier.py`        | User          | Functional | Conservative; fallback prevents empty results                                   |
-| `exporter.py`        | Claude        | Stable     | JSON + CSV with per-column provenance                                           |
-| `llm.py`             | Claude + user | Stable     | Dual-provider pool (OpenAI planner + Groq extractor), markdown fence extraction, 60s timeout |
+| Module                 | Author        | Status     | Notes                                                                                             |
+| ---------------------- | ------------- | ---------- | ------------------------------------------------------------------------------------------------- |
+| `query_normalizer.py`  | Claude        | Stable     | Bounded cleanup only; improves retrieval without rewriting user intent                             |
+| `planner.py`           | Claude        | Stable     | Constrained families + schema templates; avoids generic planner drift                              |
+| `brave_search.py`      | Claude        | Stable     | 15–25 unique URLs typical                                                                         |
+| `scraper.py`           | Claude        | Stable     | trafilatura handles most pages; JS-rendered pages skipped                                         |
+| `extractor.py`         | Claude + user | Stable     | Discovery + fill modes, chunk semaphore, provider fallback                                        |
+| `merger.py`            | Claude + user | Stable     | Lookup refresh fix applied                                                                        |
+| `official_site.py`     | Claude        | Functional | Conservative heuristic resolver; useful but not exhaustive                                        |
+| `ranker.py`            | Claude + user | Stable     | 6-component score; early prune softened in Iteration 21                                           |
+| `reranker.py`          | Claude        | Stable     | Cross-encoder ms-marco-MiniLM-L-6-v2 + Jaccard fallback                                           |
+| `cell_verifier.py`     | Claude        | Stable     | Three-rule alignment, 0.6× penalty                                                                |
+| `field_validator.py`   | Claude        | Stable     | URL/phone/rating normalization at extraction boundary                                             |
+| `gap_fill.py`          | Claude + user | Functional | Focused fill now prefers official/about/contact pages first                                       |
+| `source_quality.py`    | User          | Functional | Domain lists hand-curated; food/startup-biased                                                    |
+| `verifier.py`          | User          | Functional | Late filter; much less aggressive than the earlier precision-first configuration                  |
+| `exporter.py`          | Claude        | Stable     | JSON + CSV with per-column provenance                                                             |
+| `llm.py`               | Claude + user | Stable     | Dual-provider pool (OpenAI planner + Groq extractor), markdown fence extraction, 60s timeout      |
 
 ### What is stable
 
-- Full pipeline from query to ranked table
+- Full pipeline from normalized query to ranked table
 - Per-cell provenance (source_url, title, snippet, confidence)
+- Discovery-first extraction for broad queries
 - Per-stage `pipeline_counts` metadata for live debugging
 - SQLite caching of scraped pages (24h TTL in `/tmp`)
 - JSON/CSV export with provenance columns
@@ -1470,13 +1559,14 @@ POST /api/search
 
 ### What is still weak
 
-- **Cell-level entity consistency:** mostly mitigated by `cell_verifier.py` (Iteration 10), but short entity names can still false-match on fuzzy `partial_ratio`
+- **Official-site resolution recall:** `official_site.py` is intentionally conservative and still misses many rows that really do have a canonical website
+- **Cell-level entity consistency:** mostly mitigated by `cell_verifier.py`, but short entity names can still false-match on fuzzy `partial_ratio`
 - **JS-rendered pages:** SPAs return empty content — skipped by `_MIN_TEXT_LENGTH` threshold
 - **Source domain lists:** `source_quality.py` is calibrated for food/startup queries; other domains get neutral `unknown` score
 - ~~**No URL validation:**~~ **Resolved** in Iteration 10 — `field_validator.py` rejects bare words, normalizes scheme/host
 - ~~**Schema planner edge cases:**~~ **Resolved** in Iteration 19 — `PlannerOutput.search_angles` required-field bug caused permanent fallback on all queries. Fixed by adding `default_factory=list`.
 - ~~**No source diversity constraint:**~~ **Resolved** in Iteration 10 — `_source_diversity()` in `ranker.py` with 0.08 weight
-- ~~**No automated evaluation:**~~ **Resolved** in Iteration 11 — `scripts/eval.py` provides a repeatable CLI harness with 10 queries, 7 metrics, and tag-based ablation support
+- ~~**No automated evaluation:**~~ **Resolved** in Iteration 11 / expanded in Iteration 21 — `scripts/eval.py` provides a repeatable CLI harness with 10 queries and expanded recall-oriented proxy metrics
 
 ### Intentionally out of scope
 
@@ -1501,9 +1591,9 @@ POST /api/search
 
 5. ~~**No URL validation:**~~ **Resolved** — `field_validator.py` (Iteration 10) rejects bare words without TLDs, normalizes scheme/host/trailing-slash.
 
-6. **Latency:** 15–45s typical with Groq (25–60s with OpenAI), plus 10–20s for gap-fill. Phase tracker provides live feedback during the wait.
+6. **Latency:** 20–60s is still typical on a healthy primary extractor. Under Groq throttling, fallback-heavy runs can exceed 100s because discovery and fill both retry on OpenAI rather than failing closed.
 
-7. **Single-round gap-fill:** Entities still sparse after one enrichment round remain sparse. Second round would improve completeness at doubled cost.
+7. **Single-round focused fill:** Entities still sparse after one enrichment round remain sparse. A second round would improve completeness at doubled cost.
 
 8. **No query caching:** Re-running the same query re-executes the full pipeline. Only page scraping is cached.
 
@@ -1516,3 +1606,5 @@ POST /api/search
 12. **Model deprecation risk:** Groq (and other providers) can decommission models without notice. The system detects the downstream symptom (0 entities from many pages) via the safeguard log, but does not detect the upstream cause (`model_decommissioned` error code) specifically. A future improvement could validate the model on startup or detect the specific error code in `chat_json()` and raise a non-swallowable error.
 
 13. **Silent planner fallback:** `plan_schema()` catches all exceptions from LLM schema inference and falls back to a generic plan. This is intentional for resilience, but it masks permanent configuration errors (e.g., Iteration 19's required-field bug ran silently for an unknown number of queries). The fallback only logs at WARNING and does not currently surface structured planner-fallback metadata to the client.
+
+14. **Official-site heuristics are conservative:** Canonical-domain resolution only fires when the page/domain signals look strong. This avoids attaching the wrong website, but it also means many valid rows still rely on editorial/directory evidence instead of an explicit official-site match.

@@ -33,6 +33,15 @@ _CANONICAL_FACET_TYPES = {
     "other",
 }
 
+_CANONICAL_QUERY_FAMILIES = {
+    "local_business",
+    "startup_company",
+    "software_tool",
+    "product_category",
+    "organization",
+    "fallback_generic",
+}
+
 
 class SearchFacet(BaseModel):
     """A typed retrieval facet. Each facet expresses one clear search intent."""
@@ -49,10 +58,17 @@ class SearchFacet(BaseModel):
 
 
 class PlannerOutput(BaseModel):
+    query_family: str = "fallback_generic"
     entity_type: str
     columns: List[str]                 # always starts with "name"; max 8
     search_angles: List[str] = Field(default_factory=list)  # derived from facets post-validation
     facets: List[SearchFacet] = Field(default_factory=list)
+
+    @field_validator("query_family")
+    @classmethod
+    def _normalize_query_family(cls, v: str) -> str:
+        v = (v or "").strip().lower().replace("-", "_").replace(" ", "_")
+        return v if v in _CANONICAL_QUERY_FAMILIES else "fallback_generic"
 
 
 # ── Brave search ───────────────────────────────────────────────────────────────
@@ -110,9 +126,13 @@ class EntityRow(BaseModel):
     cells: Dict[str, Cell]          # column_name → Cell
     aggregate_confidence: float
     sources_count: int
+    canonical_domain: Optional[str] = None
 
 
 class SearchMetadata(BaseModel):
+    original_query: Optional[str] = None
+    normalized_query: Optional[str] = None
+    query_family: Optional[str] = None
     search_angles: List[str]
     facets: List[SearchFacet] = Field(default_factory=list)
     urls_considered: int

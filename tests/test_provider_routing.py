@@ -85,9 +85,14 @@ async def test_planner_passes_planner_provider(monkeypatch):
         captured_kwargs.update(kwargs)
         return model_class(
             entity_type="tool",
-            columns=["name", "website"],
-            search_angles=[],
-            facets=[],
+            facets=[
+                {
+                    "type": "entity_list",
+                    "query": "best developer tools",
+                    "expected_fill_columns": ["name", "website"],
+                    "rationale": "discover candidates",
+                }
+            ],
         )
 
     monkeypatch.setattr(planner, "chat_json_validated", fake_chat_json_validated)

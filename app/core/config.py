@@ -45,7 +45,7 @@ class Settings(BaseSettings):
     cache_ttl_hours: int = 24
 
     # Gap-fill bounds
-    gap_fill_max_entities: int = 3
+    gap_fill_max_entities: int = 5
     gap_fill_max_urls_per_entity: int = 2
 
     # Reranker (cross-encoder before extraction)

@@ -13,7 +13,6 @@ The extractor never invents missing values: it omits unsupported fields.
 from __future__ import annotations
 
 import asyncio
-import json
 from typing import Optional
 
 from app.core.config import get_settings
@@ -33,7 +32,7 @@ log = get_logger(__name__)
 
 # ── Prompts ───────────────────────────────────────────────────────────────────
 
-_SYSTEM = """You are a precise structured data extractor. Your job is to read web page content
+_FILL_SYSTEM = """You are a precise structured data extractor. Your job is to read web page content
 and extract entities that are relevant to the user's search query.
 
 Return ONLY a JSON object in this exact shape:
@@ -66,7 +65,7 @@ Critical rules:
 8. Do NOT add any extra keys. Output valid JSON only.
 """
 
-_USER_TEMPLATE = """User query: {query}
+_FILL_USER_TEMPLATE = """User query: {query}
 Entity type to extract: {entity_type}
 Columns to look for: {columns}
 
@@ -79,6 +78,53 @@ Page title: {page_title}
 
 Extract all {entity_type} entities from this page that are relevant to the query.
 Remember: omit any column not supported by the content."""
+
+_DISCOVERY_SYSTEM = """You are a high-recall entity discovery extractor.
+
+Your job is to scan web page content and return ALL plausible entity candidates
+relevant to the user query. Candidate discovery prioritizes recall first.
+
+Return ONLY a JSON object in this exact shape:
+
+{
+  "entities": [
+    {
+      "entity_name": "<candidate entity name>",
+      "cells": {
+        "<column_name>": {
+          "value": "<supported value>",
+          "evidence_snippet": "<short quote from the page>",
+          "confidence": <float 0.0-1.0>
+        }
+      }
+    }
+  ]
+}
+
+Critical rules:
+1. Return EVERY plausible candidate entity on the page that matches the query.
+2. Prioritize entity names over completeness. A candidate with only a supported
+   name is still useful.
+3. Include lightweight fields such as website, address/location, phone, or
+   category only when clearly attached to that entity on the page.
+4. Never collapse the page to a single "best" entity if multiple candidates are listed.
+5. Do not invent values. Omit unsupported columns.
+6. Output valid JSON only.
+"""
+
+_DISCOVERY_USER_TEMPLATE = """User query: {query}
+Candidate entity type: {entity_type}
+Discovery columns: {columns}
+
+Source URL: {source_url}
+Page title: {page_title}
+
+--- PAGE CONTENT START ---
+{content}
+--- PAGE CONTENT END ---
+
+Extract ALL relevant {entity_type} candidates from this page.
+Preserve every plausible candidate name you can ground in the content."""
 
 
 def _bump_stat(stats: dict[str, int] | None, key: str, amount: int = 1) -> None:
@@ -117,6 +163,36 @@ def _extractor_provider_order(settings) -> list[str]:
     return order or [primary]
 
 
+def build_candidate_discovery_plan(plan: PlannerOutput) -> PlannerOutput:
+    """Return a lighter-weight schema used for candidate discovery."""
+    preferred = ["name"]
+    for col in ("website", "address", "location", "phone_number", "phone", "category", "rating"):
+        if col in plan.columns and col not in preferred:
+            preferred.append(col)
+
+    # Ensure discovery mode still has at least one actionable field beside name.
+    if len(preferred) == 1:
+        for col in plan.columns:
+            if col != "name":
+                preferred.append(col)
+            if len(preferred) >= 4:
+                break
+
+    return PlannerOutput(
+        query_family=plan.query_family,
+        entity_type=plan.entity_type,
+        columns=preferred,
+        search_angles=list(plan.search_angles),
+        facets=list(plan.facets),
+    )
+
+
+def _prompt_for_mode(mode: str) -> tuple[str, str]:
+    if mode == "discovery":
+        return _DISCOVERY_SYSTEM, _DISCOVERY_USER_TEMPLATE
+    return _FILL_SYSTEM, _FILL_USER_TEMPLATE
+
+
 # ── Per-chunk extraction ───────────────────────────────────────────────────────
 
 async def _extract_from_chunk(
@@ -124,10 +200,12 @@ async def _extract_from_chunk(
     plan: PlannerOutput,
     page: ScrapedPage,
     chunk: str,
+    mode: str = "fill",
     stats: dict[str, int] | None = None,
 ) -> list[EntityDraft]:
     """Run LLM extraction on a single text chunk."""
-    user_msg = _USER_TEMPLATE.format(
+    system_prompt, user_template = _prompt_for_mode(mode)
+    user_msg = user_template.format(
         query=query,
         entity_type=plan.entity_type,
         columns=", ".join(plan.columns),
@@ -145,7 +223,7 @@ async def _extract_from_chunk(
         _bump_stat(stats, "llm_calls_attempted")
         try:
             raw = await chat_json(
-                _SYSTEM,
+                system_prompt,
                 user_msg,
                 temperature=0.1,
                 max_tokens=4096,
@@ -277,6 +355,7 @@ async def extract_from_page(
     plan: PlannerOutput,
     page: ScrapedPage,
     llm_sem: asyncio.Semaphore | None = None,
+    mode: str = "fill",
     stats: dict[str, int] | None = None,
 ) -> list[EntityDraft]:
     """Extract entities from a single scraped page."""
@@ -289,13 +368,13 @@ async def extract_from_page(
     _bump_stat(stats, "pages_seen")
     _bump_stat(stats, "chunks_seen", len(chunks))
 
-    log.info("Extracting from %s (%d chunk(s))", page.url, len(chunks))
+    log.info("Extracting from %s (%d chunk(s), mode=%s)", page.url, len(chunks), mode)
 
     async def _run_chunk(chunk: str) -> list[EntityDraft]:
         if llm_sem is None:
-            return await _extract_from_chunk(query, plan, page, chunk, stats=stats)
+            return await _extract_from_chunk(query, plan, page, chunk, mode=mode, stats=stats)
         async with llm_sem:
-            return await _extract_from_chunk(query, plan, page, chunk, stats=stats)
+            return await _extract_from_chunk(query, plan, page, chunk, mode=mode, stats=stats)
 
     if len(chunks) == 1:
         drafts = await _run_chunk(chunks[0])
@@ -316,14 +395,20 @@ async def extract_from_pages(
     query: str,
     plan: PlannerOutput,
     pages: list[ScrapedPage],
+    mode: str = "fill",
     stats: dict[str, int] | None = None,
 ) -> list[EntityDraft]:
     """Extract entities from all pages, bounded to N concurrent LLM calls."""
     settings = get_settings()
     llm_sem = asyncio.Semaphore(settings.max_concurrent_extractions)
     results = await asyncio.gather(
-        *[extract_from_page(query, plan, page, llm_sem=llm_sem, stats=stats) for page in pages]
+        *[extract_from_page(query, plan, page, llm_sem=llm_sem, mode=mode, stats=stats) for page in pages]
     )
     all_drafts = [d for batch in results for d in batch]
-    log.info("Extraction complete: %d candidate entities from %d pages", len(all_drafts), len(pages))
+    log.info(
+        "Extraction complete: %d candidate entities from %d pages (mode=%s)",
+        len(all_drafts),
+        len(pages),
+        mode,
+    )
     return all_drafts

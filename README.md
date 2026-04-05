@@ -16,10 +16,10 @@ Submit a query → get a ranked table of entities where every cell cites the web
 
 The CIIR Agentic Search Challenge targets systems that go beyond single-shot retrieval to perform multi-step, evidence-grounded information gathering. This system addresses that directly:
 
-- **Agentic pipeline**: query → planning → multi-angle search → scraping → reranking → extraction → merge → prune → cell verification → rank → gap-fill → verify → structured output
+- **Retrieval pipeline**: query normalization → constrained query-family planning → typed multi-angle search → scrape → rerank → candidate discovery → merge/canonicalize → official-site resolution → attribute fill → late verification → structured output
 - **Evidence grounding**: every cell in the output table has a source URL, verbatim evidence snippet, and confidence score
-- **Dynamic schema**: the schema (entity type and columns) is inferred per query — not hardcoded per domain
-- **Targeted gap-fill**: a post-extraction enrichment pass fills sparse cells with focused follow-up searches
+- **Constrained planning**: the planner picks a small query family and a strong default schema template instead of drifting into generic `entity` plans
+- **Evaluation-friendly outputs**: final metadata includes per-stage counts plus a small evaluation harness for rows, fill, actionable fields, official-site rate, and diversity
 
 ---
 
@@ -30,7 +30,12 @@ Query
   │
   ▼
 ┌─────────────┐
-│   Planner   │  LLM infers: entity_type, columns (5–8), typed retrieval facets
+│ Normalizer  │  Safe typo cleanup, spacing cleanup, light location normalization
+└──────┬──────┘
+       │
+       ▼
+┌─────────────┐
+│   Planner   │  Query family + schema template + typed retrieval facets
 └──────┬──────┘
        │
        ▼
@@ -50,8 +55,8 @@ Query
        │
        ▼
 ┌─────────────┐
-│  Extractor  │  LLM extraction per page + field validation at cell boundary
-└──────┬──────┘  Retries on a secondary provider if the primary extractor fails
+│ Discovery   │  LLM candidate discovery per page/chunk, recall-first
+└──────┬──────┘  Preserves multiple entities; retries on secondary provider if needed
        │
        ▼
 ┌─────────────┐
@@ -60,13 +65,9 @@ Query
        │
        ▼
 ┌─────────────┐
-│   Pruner    │  Drops low-information rows (name-only, weak-signal columns only)
+│ Official    │  Resolve canonical domains / likely official websites where possible
+│ Site Resolver│
 └──────┬──────┘
-       │
-       ▼
-┌─────────────┐
-│Cell Verifier│  Per-cell entity-alignment check (fuzzy name in evidence/title/domain)
-└──────┬──────┘  Penalizes misaligned cells (0.6× confidence) rather than deleting
        │
        ▼
 ┌─────────────┐
@@ -75,17 +76,22 @@ Query
        │
        ▼
 ┌─────────────┐
-│  Gap-fill   │  Top-3 sparse rows → targeted Brave queries → scrape → extract
-└──────┬──────┘  Fills only missing columns (bounded: max 3 entities × 2 URLs)
+│  Gap-fill   │  Focused attribute fill for top sparse candidates
+└──────┬──────┘  Prefers official/about/contact pages when available
        │
        ▼
 ┌─────────────┐
-│  Verifier   │  Drops marketplace-only rows on strict queries; filters low-trust sparse rows
-└──────┬──────┘  Falls back to original set if all rows would be removed
+│Cell Verifier│  Per-cell entity-alignment check (fuzzy name in evidence/title/domain)
+└──────┬──────┘  Penalizes misaligned cells (0.6× confidence) rather than deleting
        │
        ▼
 ┌─────────────┐
-│  Prune+Rank │  Final prune and re-rank after enrichment
+│  Verifier   │  Late row filter for obvious junk, weak marketplace-only rows, and thin evidence
+└──────┬──────┘  Falls back safely if all rows would be removed
+       │
+       ▼
+┌─────────────┐
+│  Prune+Rank │  Light final cleanup after enrichment and verification
 └──────┬──────┘
        │
        ▼
@@ -107,14 +113,16 @@ app/
     db.py              # SQLite async layer (aiosqlite)
   services/
     llm.py             # LLM client wrapper — dual-provider (OpenAI + Groq) with per-stage routing
-    planner.py         # Schema planning prompt
+    query_normalizer.py# Safe query cleanup before planning/retrieval
+    planner.py         # Constrained query-family planning + typed facets
     brave_search.py    # Brave Search API, parallel async
     scraper.py         # Async fetcher + trafilatura/BS4
-    extractor.py       # LLM extraction with chunking + provider fallback
+    extractor.py       # Discovery/fill extraction with chunking + provider fallback
     merger.py          # Fuzzy entity merge
+    official_site.py   # Canonical / official-site resolution heuristics
     reranker.py        # Cross-encoder reranking (+ Jaccard fallback)
     ranker.py          # Scoring, ranking, and row pruning
-    gap_fill.py        # Targeted enrichment (stretch feature)
+    gap_fill.py        # Focused attribute fill for sparse candidate rows
     source_quality.py  # Heuristic source classification (official/editorial/directory/marketplace)
     cell_verifier.py   # Per-cell entity-alignment check
     field_validator.py # URL/phone/rating normalization at extraction boundary
@@ -130,11 +138,11 @@ templates/
 static/
   app.js               # Vanilla JS: polling, phase tracker, panels, table with trust badges, modal
   style.css            # Dark theme, responsive, pipeline tracker, badge system
-tests/                 # pytest test suite (142 tests)
+tests/                 # pytest test suite (150 tests)
 scripts/
   eval.py              # Evaluation harness (CLI)
 docs/
-  BUILD_JOURNAL.md     # Full development journal (20 iterations)
+  BUILD_JOURNAL.md     # Full development journal (21 iterations)
   eval_queries.json    # Eval query set (10 queries, 3 categories)
 data/                  # Eval reports (created at runtime)
 ```
@@ -143,9 +151,9 @@ data/                  # Eval reports (created at runtime)
 
 ## Additional Features Implemented
 
-### 1. Dynamic schema inference with typed retrieval facets
+### 1. Constrained query-family planning
 
-No schemas are hardcoded per domain. For "AI startups in healthcare" the LLM infers columns like `focus_area`, `funding_stage`, `notable_claim`. For "pizza places in Brooklyn" it infers `cuisine_type`, `price_range`, `neighborhood`. The planner generates typed retrieval facets (`entity_list`, `official_source`, `editorial_review`, `attribute_specific`, `news_recent`, `comparison`) instead of free-form paraphrase angles. Each facet declares which columns it expects to help fill, giving downstream stages a structured retrieval intent.
+The planner first classifies the query into a small family such as `local_business`, `startup_company`, `software_tool`, `product_category`, `organization`, or `fallback_generic`. Each family has a strong schema template. The LLM still helps with typed retrieval facets, but it no longer controls the whole schema surface area. This prevents drift into weak plans like `entity + description + category + location`.
 
 ### 2. Per-cell provenance
 
@@ -159,11 +167,15 @@ Every cell in the output table stores:
 
 This makes the system auditable: a user can click any cell to verify exactly where the value came from.
 
-### 3. Targeted gap-fill (stretch feature)
+### 3. Two-stage discovery and fill
 
-After the initial extraction and merge pass, the system identifies the top-N entities with the most missing columns. For each, it generates focused queries (e.g., `"Tempus AI headquarters"`, `"Tempus AI official website about"`) and runs a small supplementary search+scrape+extract cycle to fill only the missing cells. This is bounded to 3 entities × 2 URLs × 1 round to keep latency and cost reasonable.
+Broad entity-discovery queries are handled in two passes. First, the extractor runs in discovery mode and preserves multiple candidate entities from list, review, and directory pages. Then `gap_fill.py` performs focused attribute filling for the top sparse candidates, using the candidate name, missing columns, and any resolved canonical site. This separation makes recall much more stable than asking one extraction pass to both discover and fully fill every row.
 
-### 4. Fuzzy entity deduplication
+### 4. Official-site resolution
+
+After candidate merge, the pipeline tries to resolve canonical domains from explicit website cells and from high-confidence official-looking pages. When resolved, these domains are preferred during attribute filling and improve trust for fields like website, address, phone, and company facts.
+
+### 5. Fuzzy entity deduplication
 
 Entities extracted from different pages that refer to the same real-world entity are merged. Matching uses:
 
@@ -171,23 +183,23 @@ Entities extracted from different pages that refer to the same real-world entity
 - Domain matching on website URLs (strong signal)
 - When merging: the highest-confidence cell per column wins
 
-### 5. Source quality scoring
+### 6. Source quality scoring
 
 Every row is scored on the trustworthiness of its evidence sources, not just extraction confidence. Sources are classified as `official` (entity's own site), `editorial` (nytimes, theinfatuation, eater, etc.), `directory` (yelp, tripadvisor), `marketplace` (ubereats, doordash), or `unknown`. The `source_quality` score is a confidence-weighted average across all cells and feeds directly into ranking.
 
-### 6. Evidence-based row verification
+### 7. Evidence-based row verification
 
 Before final ranking, a verifier pass removes rows that would not be useful to a user. For strict queries ("top", "best", "leading"), marketplace-only rows are dropped. Rows with very low source quality and few cells are also filtered. The verifier always falls back to the original set if everything would be removed.
 
-### 7. Cross-encoder reranking
+### 8. Cross-encoder reranking
 
 After scraping, pages are reranked by query relevance before extraction. A cross-encoder model (`cross-encoder/ms-marco-MiniLM-L-6-v2`) scores each page against the original query and keeps only the top-K most relevant. This focuses the extraction LLM budget on pages most likely to contain useful entity data. If the cross-encoder fails to load (e.g., no GPU, missing dependency), a Jaccard token-overlap scorer is used as fallback.
 
-### 8. Cell-level entity verification
+### 9. Cell-level entity verification
 
 After merge and again after gap-fill, every cell is checked for entity alignment: does the evidence snippet, source title, or source domain actually refer to the entity the row is assigned to? Cells that fail all three checks get a 0.6× confidence penalty. This catches the "right row, wrong fact" failure where gap-fill or multi-entity pages introduce cells from a co-mentioned entity.
 
-### 9. Field validation at the extraction boundary
+### 10. Field validation at the extraction boundary
 
 Before cells enter the pipeline, a rule-based validator normalizes and filters by column type:
 
@@ -197,9 +209,13 @@ Before cells enter the pipeline, a rule-based validator normalizes and filters b
 
 Malformed cells are dropped silently; the extractor proceedes with structurally valid data only.
 
-### 10. Source diversity in ranking
+### 11. Source diversity in ranking
 
 The ranker includes a source-diversity component: rows assembled from multiple independent domains score higher than rows where one domain contributed all cells. This is a tie-breaker (0.08 weight), not a gate — a single authoritative official source still ranks well via the dominant source_quality weight (0.32).
+
+### 12. Small evaluation harness
+
+`scripts/eval.py` drives the running server with 10 representative queries and records practical metrics: rows returned, fill rate, actionable-field rate, official-site rate, multi-source row rate, source diversity, average confidence, and runtime. It is intentionally small and reusable rather than a benchmark platform.
 
 ---
 
@@ -270,10 +286,10 @@ pytest tests/ -v
 
 | Query                            | Entity type | Sample columns inferred                                               |
 | -------------------------------- | ----------- | --------------------------------------------------------------------- |
-| `AI startups in healthcare`      | startup     | name, website, headquarters, focus_area, funding_stage, notable_claim |
-| `top pizza places in Brooklyn`   | restaurant  | name, address, cuisine_type, price_range, neighborhood, rating        |
-| `open source database tools`     | tool        | name, website, language, license, github_stars, primary_use_case      |
-| `climate tech startups series A` | startup     | name, website, focus_area, funding_amount, investors, founded         |
+| `AI startups in healthcare`      | startup     | name, website, headquarters, focus_area, product_or_service, funding_stage |
+| `top pizza places in Brooklyn`   | pizza place | name, website, address, phone_number, category, rating                    |
+| `open source database tools`     | software tool | name, website, license, language, github_repo, use_case                 |
+| `climate tech startups series A` | startup     | name, website, headquarters, focus_area, product_or_service, funding_stage |
 
 ---
 
@@ -311,8 +327,8 @@ Poll for job status. When `status = "done"`, the full result is included.
       "website",
       "headquarters",
       "focus_area",
-      "funding_stage",
-      "notable_claim"
+      "product_or_service",
+      "funding_stage"
     ],
     "rows": [
       {
@@ -331,6 +347,9 @@ Poll for job status. When `status = "done"`, the full result is included.
       }
     ],
     "metadata": {
+      "original_query": "AI startups in healthcare",
+      "normalized_query": "AI startups in healthcare",
+      "query_family": "startup_company",
       "search_angles": ["top AI healthcare startups 2024", "..."],
       "facets": [
         {
@@ -357,6 +376,9 @@ Poll for job status. When `status = "done"`, the full result is included.
         "extraction_calls": 18,
         "entities_before_merge": 42,
         "rows_after_merge": 14,
+        "candidate_rows": 14,
+        "official_sites_resolved": 4,
+        "rows_after_gap_fill": 14,
         "rows_after_verifier": 11,
         "final_rows": 11
       }
@@ -392,6 +414,12 @@ Returns `{ "status": "ok" }`.
 
 **Text chunking, not summarization**: Long pages are chunked and each chunk is extracted independently, then merged. This preserves faithful evidence snippets; summarization would lose verbatim quotes.
 
+**Query normalization is lightweight by design**: The normalizer only applies bounded cleanup and a small set of safe typo/location fixes. It is meant to rescue obvious retrieval-poisoning mistakes, not rewrite user intent.
+
+**Constrained planning beats free-form planning**: The planner uses a small query-family classifier and schema templates so it cannot drift into useless generic schemas. The LLM still contributes retrieval facets, but the entity type and columns stay reviewer-friendly and predictable.
+
+**Discovery and filling are separate responsibilities**: Candidate discovery is optimized for recall; attribute filling is optimized for completeness and provenance. Keeping them separate is simpler and more stable than forcing one extraction pass to do both jobs.
+
 **Extractor provider fallback**: Broad discovery queries should not collapse to zero rows just because one extraction provider is rate-limited. The extractor tries the configured primary provider first and retries on a configured secondary provider when needed. This favors correctness over minimum latency.
 
 **Ranker design**: The ranking formula is a weighted sum of six interpretable signals: completeness (0.25), average confidence (0.20), source quality (0.32), source support (0.08), actionable-field bonus (0.07), and source diversity (0.08). Source quality dominates by design. More complex ranking (BM25 against query, embedding similarity) was intentionally omitted — the signals are already well-correlated with quality and remain fully explainable.
@@ -404,7 +432,7 @@ Returns `{ "status": "ok" }`.
 - **Dynamic pages**: JavaScript-rendered pages (SPAs) are not scraped; the system fetches static HTML only. This misses some sources.
 - **Rate limits**: Running many queries quickly may hit Brave or Groq rate limits (depends on your plan). When Groq throttles, extraction can fall back to OpenAI if configured, which preserves results but increases latency and cost.
 - **Latency**: A typical query takes 15–45 seconds with Groq extraction (25–60s with OpenAI extraction) depending on page count, reranking, and LLM speed. The cross-encoder adds ~1-2s; gap-fill adds 10–20s. Extractor fallback during provider throttling can push latency higher.
-- **Schema quality**: Typed facets improved planner output, but very broad queries still occasionally produce generic columns.
+- **Schema quality**: Constrained planning sharply reduced generic schemas, but `fallback_generic` still exists for ambiguous topics and can be weaker than the domain-specific families.
 - **Cell verifier false matches**: Short entity names (e.g. "Joe's") can fuzzy-match against unrelated evidence. The 80-threshold partial_ratio mitigates but does not eliminate this.
 - **Source domain calibration**: `source_quality.py` is calibrated for food/startup queries. Medical, legal, and academic domains get a neutral `unknown` score (0.55).
 - **No ground-truth evaluation**: The eval harness measures proxy signals (fill rate, multi-source rate, diversity) — not precision/recall against labeled data.
@@ -427,7 +455,7 @@ With the default split-provider setup (`gpt-4o-mini` planner + `llama-3.3-70b-ve
 
 - Planner: ~0.3–1.0s
 - Extractor: ~0.5–1.5s per page, ~1500 tokens per chunk — the dominant cost
-- Gap-fill: adds ~5–15s and 2–4 extra LLM calls for sparse rows
+- Gap-fill: adds ~10–25s and up to 5 focused entity fills for sparse rows
 
 Groq provides significantly faster extraction inference than hosted OpenAI models, but its free tier may apply stricter rate limits. Estimated token cost per query is still **~30k–80k tokens**. When extractor fallback to OpenAI is triggered, total latency and spend rise, but broad queries continue to return rows instead of failing closed with empty output.
 
@@ -451,11 +479,11 @@ The extractor prompt explicitly instructs the LLM to omit values not supported b
 
 ## Notes on gap-fill refinement
 
-Gap-fill is triggered after the initial merge. The `find_sparse_rows()` function in `ranker.py` selects the top-N rows with the most missing columns. For each:
+Gap-fill is triggered after candidate merge and ranking. The `find_sparse_rows()` function in `ranker.py` selects the top-N rows with the most missing columns. For each:
 
-1. `gap_fill.py` generates 1–2 focused queries, prioritizing high-value missing columns (`website`, `headquarters`, `funding_stage`).
-2. A fresh Brave search is run for these queries.
-3. Up to 2 pages are scraped and run through the same LLM extractor.
+1. `gap_fill.py` generates focused queries, prioritizing high-value missing columns (`website`, `headquarters`, `funding_stage`) and using any resolved canonical domain first.
+2. A fresh Brave search is run only if the official/canonical pages do not already cover the gap.
+3. A small set of pages is scraped and run through the same LLM extractor in fill mode.
 4. Only cells for **missing columns** are accepted; already-filled cells are not overwritten unless the new evidence has higher confidence.
 
 This design keeps gap-fill cheap and safe — it cannot degrade existing high-quality cells.
@@ -477,7 +505,7 @@ python scripts/eval.py --category food
 python scripts/eval.py --tag no-rerank
 ```
 
-Results are saved to `data/eval_<tag>_<timestamp>.json` and `.csv`. Metrics include: rows returned, fill rate, actionable rate, multi-source rate, average confidence, source diversity, and duration.
+Results are saved to `data/eval_<tag>_<timestamp>.json` and `.csv`. Metrics include: rows returned, fill rate, actionable-field rate, official-site rate, multi-source rate, average confidence, source diversity, and duration.
 
 See `docs/eval_queries.json` for the query set (10 queries across food, tech, and travel categories).
 
@@ -487,13 +515,13 @@ See `docs/eval_queries.json` for the query set (10 queries across food, tech, an
 
 The improvement phases were ordered by practical impact on output quality:
 
-1. **Facet-typed planning** (Phase 4): The planner drives everything downstream. Replacing paraphrase angles with typed facets gives the system structured retrieval intent — entity lists for recall, official sources for trust, editorial for context. This is the highest-leverage change because every later stage benefits from better input pages.
+1. **Query normalization + constrained planning**: The planner drives everything downstream, so the first win is making it predictable. Light normalization rescues obvious typos, and query-family templates keep the schema from collapsing into generic output.
 
-2. **Cross-encoder reranking** (Phase 4): Scraping is expensive (network I/O + LLM tokens). Reranking the scraped pages by query relevance before extraction focuses the token budget on pages that actually contain the target entities. The cross-encoder is free (local model), and the Jaccard fallback ensures the pipeline works without GPU.
+2. **Discovery-first extraction + official-site resolution**: Broad queries fail when recall collapses too early. Separating candidate discovery from attribute fill keeps more plausible entities alive, and official-site resolution improves the later facts without turning recall into a hard gate.
 
-3. **Cell verification + field validation + source diversity** (Phase 5): These close the gap between row-level quality (which was already addressed by source_quality + verifier) and cell-level integrity. The cell verifier catches cross-entity contamination; field validation catches malformed values; diversity scoring rewards independent corroboration.
+3. **Cross-encoder reranking + softer late filtering**: Reranking keeps extraction focused, while late verification avoids zeroing out broad discovery runs before ranking has a chance to separate strong rows from weak ones.
 
-4. **Evaluation harness** (Phase 6): Without metrics, everything above is validated by unit tests and gut feel. The eval harness makes quality measurable — even if the metrics are proxy signals rather than ground truth.
+4. **Evaluation harness**: Without metrics, everything above is validated by unit tests and gut feel. The eval harness makes quality measurable — even if the metrics are still proxy signals rather than ground truth.
 
 All improvements are heuristic. Source quality classification uses hand-curated domain lists, not a trained classifier. Cell verification uses fuzzy string matching, not a semantic model. The evaluation harness measures fill rate and diversity, not factual accuracy. These are practical engineering choices for a system that needs to work across arbitrary domains without labeled training data.
 
@@ -505,13 +533,13 @@ The UI is intentionally a single-page Jinja2 template with vanilla JS — no fra
 
 **Phase tracker:** An 8-stage horizontal pipeline indicator shows the current phase during execution (planning → searching → scraping → reranking → extracting → merging → gap-fill → verifying). Each stage dot transitions from pending → active → done as the job progresses. A live elapsed timer shows wall-clock time.
 
-**Retrieval plan panel:** After results arrive, a collapsible panel shows what the planner decided: entity type, columns, each typed facet (with its query and expected-fill columns), and reranking stats. This makes the system's retrieval strategy inspectable without digging into logs.
+**Retrieval plan panel:** After results arrive, a collapsible panel shows the normalized query (when it changed), query family, entity type, columns, each typed facet (with its query and expected-fill columns), and reranking stats. This makes the system's retrieval strategy inspectable without digging into logs.
 
-**Quality controls panel:** Summarizes which verification and filtering steps ran: cross-encoder reranking, entity deduplication with merge counts, gap-fill enrichment, cell-level verification, field validation, source quality/diversity scoring, and final row filtering. It shows the controls that were active, not fabricated precision.
+**Quality controls panel:** Summarizes which recall and quality controls ran: query normalization, constrained planning, candidate discovery, deduplication, official-site resolution, gap-fill enrichment, cell-level verification, field validation, source quality/diversity scoring, and late row filtering. It shows the controls that were active, not fabricated precision.
 
 **Trust badges on rows:** Each row in the results table shows badges for sources count, confidence tier (high/medium/low), and source type diversity (official, editorial, directory, marketplace). Rows with only a single source get a warning badge. These are computed from the actual cell data — source URLs are classified against the same domain lists used by `source_quality.py`.
 
-**Run stats panel:** A compact stats table showing URLs considered, pages scraped, pages after reranking, entities extracted, entities after merge, gap-fill usage, and total duration. The backend also exposes deeper per-stage counters in `SearchMetadata.pipeline_counts` for debugging pipeline collapses.
+**Run stats panel:** A compact stats table showing query family, normalized query, URLs considered, pages scraped, candidate rows, official-site matches, entities extracted, entities after merge, gap-fill usage, and total duration. The backend also exposes deeper per-stage counters in `SearchMetadata.pipeline_counts` for debugging pipeline collapses.
 
 **Enhanced evidence modal:** Clicking a cell opens a modal with the cell value, confidence bar, verbatim evidence snippet, source URL (linked), source title, and a source-type badge. Validation flags (low confidence, single source) appear when applicable.
 

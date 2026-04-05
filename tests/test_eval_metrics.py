@@ -67,6 +67,7 @@ class TestComputeMetricsHappyPath:
         ]
         m = _compute_metrics(_make_result(rows, ["name", "website"]))
         assert m["actionable_rate"] == 0.5  # 1 of 2 rows has actionable
+        assert m["avg_actionable_fields"] == 0.5
 
     def test_multi_source_detection(self):
         rows = [
@@ -108,12 +109,21 @@ class TestComputeMetricsHappyPath:
         assert m["avg_source_diversity"] == 0.5  # 1 - (1/2)
 
     def test_metadata_passthrough(self):
-        meta = {"duration_seconds": 12.3, "pages_scraped": 8, "gap_fill_used": True}
+        meta = {
+            "duration_seconds": 12.3,
+            "pages_scraped": 8,
+            "gap_fill_used": True,
+            "query_family": "local_business",
+            "normalized_query": "best pizza places in Brooklyn",
+        }
         m = _compute_metrics(_make_result(
-            [{"cells": {"name": _cell()}, "aggregate_confidence": 0.5}],
+            [{"cells": {"name": _cell()}, "aggregate_confidence": 0.5, "canonical_domain": "lucali.com"}],
             ["name"],
             metadata=meta,
         ))
         assert m["duration_seconds"] == 12.3
         assert m["pages_scraped"] == 8
         assert m["gap_fill_used"] is True
+        assert m["official_site_rate"] == 1.0
+        assert m["query_family"] == "local_business"
+        assert m["normalized_query"] == "best pizza places in Brooklyn"

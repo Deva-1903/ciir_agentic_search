@@ -101,7 +101,7 @@ async def test_extract_from_pages_limits_global_llm_concurrency(monkeypatch):
     active = 0
     peak = 0
 
-    async def fake_extract_from_chunk(query: str, plan: PlannerOutput, page: ScrapedPage, chunk: str, stats=None):
+    async def fake_extract_from_chunk(query: str, plan: PlannerOutput, page: ScrapedPage, chunk: str, mode="fill", stats=None):
         nonlocal active, peak
         active += 1
         peak = max(peak, active)
@@ -239,7 +239,7 @@ async def test_extract_from_pages_accumulates_across_pages(monkeypatch):
     """Regression test: entities from multiple pages must be accumulated, not overwritten."""
     call_count = 0
 
-    async def fake_extract_from_chunk(query, plan, page, chunk, stats=None):
+    async def fake_extract_from_chunk(query, plan, page, chunk, mode="fill", stats=None):
         nonlocal call_count
         call_count += 1
         return [
@@ -271,3 +271,16 @@ async def test_extract_from_pages_accumulates_across_pages(monkeypatch):
 
     drafts = await extractor.extract_from_pages("query", plan, pages)
     assert len(drafts) == 4, f"Expected 4 entities (one per page), got {len(drafts)}"
+
+
+def test_build_candidate_discovery_plan_prefers_lightweight_columns():
+    plan = PlannerOutput(
+        query_family="local_business",
+        entity_type="pizza place",
+        columns=["name", "website", "address", "phone_number", "category", "rating"],
+        search_angles=["top pizza places in Brooklyn"],
+    )
+
+    discovery_plan = extractor.build_candidate_discovery_plan(plan)
+
+    assert discovery_plan.columns == ["name", "website", "address", "phone_number", "category", "rating"]

@@ -28,10 +28,12 @@ from app.models.schema import (
 from app.core.config import get_settings
 from app.services.brave_search import run_brave_search
 from app.services.cell_verifier import verify_rows_cells
-from app.services.extractor import extract_from_pages
+from app.services.extractor import build_candidate_discovery_plan, extract_from_pages
 from app.services.gap_fill import run_gap_fill
 from app.services.merger import merge_entities
+from app.services.official_site import resolve_official_sites
 from app.services.planner import plan_schema
+from app.services.query_normalizer import normalize_query
 from app.services.ranker import prune_rows, rank_rows
 from app.services.reranker import rerank_pages
 from app.services.scraper import scrape_pages
@@ -54,15 +56,24 @@ async def _run_pipeline(job_id: str, query: str) -> None:
         await update_job_phase(job_id, name)
 
     try:
+        normalized = normalize_query(query)
+        retrieval_query = normalized.normalized_query or query
+
         # 1. Plan schema
         await _phase("planning")
-        plan: PlannerOutput = await plan_schema(query)
+        plan: PlannerOutput = await plan_schema(retrieval_query)
         pipeline_counts: dict[str, int] = {
             "search_angles": len(plan.search_angles),
             "search_facets": len(plan.facets),
         }
-        log.info("Plan: entity_type=%r  columns=%s  facets=%d",
-                 plan.entity_type, plan.columns, len(plan.facets))
+        log.info(
+            "Plan: family=%s entity_type=%r columns=%s facets=%d normalized_query=%r",
+            plan.query_family,
+            plan.entity_type,
+            plan.columns,
+            len(plan.facets),
+            retrieval_query,
+        )
 
         # 2. Search
         await _phase("searching")
@@ -73,8 +84,8 @@ async def _run_pipeline(job_id: str, query: str) -> None:
 
         # 3. Scrape
         await _phase("scraping")
-        pages = await scrape_pages(brave_results)
-        pages_scraped = len(pages)
+        scraped_pages = await scrape_pages(brave_results)
+        pages_scraped = len(scraped_pages)
         pipeline_counts["pages_scraped"] = pages_scraped
         log.info("Scrape: %d/%d pages OK", pages_scraped, urls_considered)
 
@@ -83,19 +94,35 @@ async def _run_pipeline(job_id: str, query: str) -> None:
 
         # 3.5 Rerank: focus extraction budget on top-K query-relevant pages
         settings = get_settings()
+        pages_for_discovery = scraped_pages
         rerank_info: dict = {"scorer": None, "pages_after": pages_scraped}
         if settings.rerank_enabled and pages_scraped > settings.rerank_top_k:
             await _phase("reranking")
-            pages, rerank_info = await rerank_pages(query, pages, settings.rerank_top_k)
+            pages_for_discovery, rerank_info = await rerank_pages(
+                retrieval_query,
+                scraped_pages,
+                settings.rerank_top_k,
+            )
         else:
             rerank_info = {"scorer": None, "pages_after": pages_scraped}
-        pipeline_counts["pages_after_rerank"] = len(pages)
+        pipeline_counts["pages_after_rerank"] = len(pages_for_discovery)
 
-        # 4. Extract
+        # 4. Candidate discovery
         await _phase("extracting")
-        log.info("Extracting from %d pages (this is the slow step)…", len(pages))
+        discovery_plan = build_candidate_discovery_plan(plan)
+        log.info(
+            "Discovering candidates from %d reranked pages using columns=%s",
+            len(pages_for_discovery),
+            discovery_plan.columns,
+        )
         extraction_stats: dict[str, int] = {}
-        drafts = await extract_from_pages(query, plan, pages, stats=extraction_stats)
+        drafts = await extract_from_pages(
+            retrieval_query,
+            discovery_plan,
+            pages_for_discovery,
+            mode="discovery",
+            stats=extraction_stats,
+        )
         entities_extracted = len(drafts)
         pipeline_counts["extraction_calls"] = extraction_stats.get("llm_calls_attempted", 0)
         pipeline_counts["chunks_extracted"] = extraction_stats.get("chunks_seen", 0)
@@ -104,49 +131,45 @@ async def _run_pipeline(job_id: str, query: str) -> None:
         pipeline_counts["provider_fallback_attempts"] = extraction_stats.get("provider_fallback_attempts", 0)
         pipeline_counts["provider_fallback_successes"] = extraction_stats.get("provider_fallback_successes", 0)
         pipeline_counts["entities_before_merge"] = entities_extracted
-        log.info("Extraction done: %d candidate entities", entities_extracted)
+        log.info("Candidate discovery done: %d extracted candidates", entities_extracted)
 
-        if entities_extracted == 0 and len(pages) >= 3:
+        if entities_extracted == 0 and len(pages_for_discovery) >= 3:
             log.error(
                 "Extraction returned 0 entities from %d pages (llm_calls=%d fallback_attempts=%d) — this likely "
                 "indicates a systemic failure (model misconfiguration, API error, "
                 "or prompt incompatibility). Check LLM logs above for errors.",
-                len(pages),
+                len(pages_for_discovery),
                 pipeline_counts["extraction_calls"],
                 pipeline_counts["provider_fallback_attempts"],
             )
 
-        # 5. Merge
+        # 5. Merge candidate rows
         await _phase("merging")
         rows = merge_entities(drafts, plan)
         rows_after_merge = len(rows)
         pipeline_counts["rows_after_merge"] = rows_after_merge
-        rows = prune_rows(rows, plan)
-        rows_after_initial_prune = len(rows)
-        pipeline_counts["rows_after_initial_prune"] = rows_after_initial_prune
         entities_after_merge = rows_after_merge
-        log.info(
-            "Merge done: %d canonical rows (%d after initial prune)",
-            rows_after_merge,
-            rows_after_initial_prune,
-        )
+        pipeline_counts["rows_after_initial_prune"] = rows_after_merge
 
-        # 5.5 Cell-level verification (name-alignment penalty)
-        if settings.cell_verifier_enabled:
-            rows = verify_rows_cells(rows)
+        rows, official_sites_resolved = resolve_official_sites(rows, scraped_pages)
+        pipeline_counts["official_sites_resolved"] = official_sites_resolved
+        pipeline_counts["candidate_rows"] = len(rows)
+        log.info("Merge done: %d canonical candidate rows", rows_after_merge)
 
-        # 6. Rank
-        log.info("Ranking rows…")
+        # 6. Rank candidates before filling
+        log.info("Ranking candidate rows…")
         rows = rank_rows(rows, plan)
 
-        # 7. Gap-fill
+        # 7. Focused attribute filling
         await _phase("gap_filling")
-        rows, gap_fill_used = await run_gap_fill(rows, plan, query)
+        rows, gap_fill_used = await run_gap_fill(rows, plan, retrieval_query)
         pipeline_counts["rows_after_gap_fill"] = len(rows)
         log.info("Gap-fill done: used=%s", gap_fill_used)
-        # Re-run cell verification because gap-fill adds new cells.
+        # Cell verification runs after filling so we do not penalize discovery-only rows too early.
         if settings.cell_verifier_enabled:
             rows = verify_rows_cells(rows)
+
+        rows = rank_rows(rows, plan)
 
         await _phase("verifying")
         rows = verify_rows(rows, plan, query)
@@ -172,6 +195,9 @@ async def _run_pipeline(job_id: str, query: str) -> None:
             columns=plan.columns,
             rows=rows,
             metadata=SearchMetadata(
+                original_query=query,
+                normalized_query=retrieval_query,
+                query_family=plan.query_family,
                 search_angles=plan.search_angles,
                 facets=plan.facets,
                 urls_considered=urls_considered,

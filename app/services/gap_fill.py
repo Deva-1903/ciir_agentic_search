@@ -23,7 +23,7 @@ from app.services.brave_search import run_brave_search
 from app.services.extractor import extract_from_page
 from app.services.merger import _pick_better_cell
 from app.services.ranker import find_sparse_rows
-from app.services.scraper import scrape_pages
+from app.services.scraper import scrape_pages, scrape_urls
 from app.utils.dedupe import names_are_similar
 
 log = get_logger(__name__)
@@ -87,6 +87,20 @@ def _missing_cols(row: EntityRow, plan: PlannerOutput) -> list[str]:
     return [col for col in plan.columns if col not in row.cells]
 
 
+def _official_urls_for_row(row: EntityRow) -> list[str]:
+    website = row.cells.get("website") or row.cells.get("homepage") or row.cells.get("url")
+    if not website or not website.value:
+        return []
+
+    base = website.value.rstrip("/")
+    urls = [website.value]
+    for suffix in ("/about", "/contact"):
+        candidate = f"{base}{suffix}"
+        if candidate not in urls:
+            urls.append(candidate)
+    return urls[:2]
+
+
 async def run_gap_fill(
     rows: list[EntityRow],
     plan: PlannerOutput,
@@ -129,9 +143,25 @@ async def run_gap_fill(
         gap_plan = _make_gap_plan(plan, missing)
         focused_query = entity_name_str
 
-        # Only scrape a small number of pages
+        pages = []
+        official_urls = _official_urls_for_row(row)
+        if official_urls:
+            pages.extend(await scrape_urls(official_urls))
+
+        # Only scrape a small number of additional search-result pages
         limited = brave_results[: settings.gap_fill_max_urls_per_entity]
-        pages = await scrape_pages(limited)
+        if limited:
+            pages.extend(await scrape_pages(limited))
+
+        # Preserve order while deduplicating URLs.
+        deduped_pages: list = []
+        seen_urls: set[str] = set()
+        for page in pages:
+            if page.url in seen_urls:
+                continue
+            seen_urls.add(page.url)
+            deduped_pages.append(page)
+        pages = deduped_pages
 
         for page in pages:
             drafts = await extract_from_page(focused_query, gap_plan, page)

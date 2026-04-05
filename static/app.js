@@ -176,7 +176,7 @@ const PHASE_LABELS = {
   searching: "Searching the web…",
   scraping: "Scraping pages…",
   reranking: "Reranking pages…",
-  extracting: "Extracting entities…",
+  extracting: "Discovering candidates…",
   merging: "Merging & deduplicating…",
   gap_filling: "Gap-fill enrichment…",
   verifying: "Verifying quality…",
@@ -334,9 +334,13 @@ async function pollJob() {
 // ── Render results ─────────────────────────────────────────────────────────
 function renderResults(data) {
   const m = data.metadata;
+  const normalizedChanged =
+    m.normalized_query && m.normalized_query !== (m.original_query || currentQuery);
 
   // ── Summary strip ──
-  sumQuery.textContent = currentQuery;
+  sumQuery.textContent = normalizedChanged
+    ? `${currentQuery} → ${m.normalized_query}`
+    : currentQuery;
   sumEntityType.textContent = data.entity_type;
   sumRows.textContent = data.rows.length;
   sumSources.textContent = m.urls_considered;
@@ -370,6 +374,12 @@ function renderResults(data) {
 // ── Retrieval plan panel ───────────────────────────────────────────────────
 function renderRetrievalPlan(data, m) {
   let html = "";
+  if (m.query_family) {
+    html += `<div class="plan-row"><span class="plan-label">Query family:</span> <span class="plan-value">${esc(m.query_family)}</span></div>`;
+  }
+  if (m.normalized_query && m.normalized_query !== (m.original_query || currentQuery)) {
+    html += `<div class="plan-row"><span class="plan-label">Normalized query:</span> <span class="plan-value">${esc(m.normalized_query)}</span></div>`;
+  }
   html += `<div class="plan-row"><span class="plan-label">Entity type:</span> <span class="plan-value">${esc(data.entity_type)}</span></div>`;
   html += `<div class="plan-row"><span class="plan-label">Columns:</span> <span class="plan-value">${data.columns.map((c) => esc(humanColumn(c))).join(", ")}</span></div>`;
 
@@ -411,12 +421,31 @@ function renderRetrievalPlan(data, m) {
 function renderQualityControls(m) {
   const items = [];
 
+  if (m.normalized_query) {
+    items.push({
+      icon: "↺",
+      text:
+        m.normalized_query !== (m.original_query || currentQuery)
+          ? `Query normalization applied before retrieval: ${m.normalized_query}`
+          : "Query normalization checked before retrieval",
+    });
+  }
+  if (m.query_family) {
+    items.push({
+      icon: "⌘",
+      text: `Constrained schema selected from query family: ${m.query_family}`,
+    });
+  }
   if (m.rerank_scorer) {
     items.push({
       icon: "⚡",
       text: `Cross-encoder reranking: ${m.pages_scraped} → ${m.pages_after_rerank} pages`,
     });
   }
+  items.push({
+    icon: "🔎",
+    text: "Candidate discovery runs before attribute filling to preserve recall",
+  });
   if (m.entities_extracted && m.entities_after_merge) {
     const deduped = m.entities_extracted - m.entities_after_merge;
     if (deduped > 0) {
@@ -426,6 +455,13 @@ function renderQualityControls(m) {
       });
     }
   }
+  items.push({
+    icon: "🌐",
+    text:
+      (m.pipeline_counts?.official_sites_resolved || 0) > 0
+        ? `Official-site resolution matched ${m.pipeline_counts.official_sites_resolved} candidate rows`
+        : "Official-site resolution runs when canonical domains can be inferred",
+  });
   items.push({ icon: "✓", text: "Cell-level entity-alignment verification" });
   items.push({
     icon: "✓",
@@ -444,7 +480,7 @@ function renderQualityControls(m) {
   }
   items.push({
     icon: "✓",
-    text: "Low-information & marketplace-only row filtering",
+    text: "Rank first, then late filtering for obvious junk and weak marketplace rows",
   });
 
   let html = '<ul class="qc-list">';
@@ -460,13 +496,19 @@ function renderRunStats(m) {
   const rows = [
     ["Total duration", `${m.duration_seconds}s`],
     ["Execution mode", "Async background job (non-blocking)"],
+    ["Query family", m.query_family || "fallback_generic"],
     ["URLs considered", m.urls_considered],
     ["Pages scraped", m.pages_scraped],
     ["Pages sent to extraction", m.pages_after_rerank || m.pages_scraped],
     ["Entities extracted", m.entities_extracted],
     ["Entities after merge", m.entities_after_merge],
+    ["Candidate rows", m.pipeline_counts?.candidate_rows ?? m.entities_after_merge],
+    ["Official sites resolved", m.pipeline_counts?.official_sites_resolved ?? 0],
     ["Gap-fill", m.gap_fill_used ? "Yes" : "No"],
   ];
+  if (m.normalized_query && m.normalized_query !== (m.original_query || currentQuery)) {
+    rows.splice(2, 0, ["Normalized query", m.normalized_query]);
+  }
   if (m.rerank_scorer) {
     rows.push(["Rerank scorer", m.rerank_scorer]);
   }

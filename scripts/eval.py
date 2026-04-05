@@ -101,6 +101,8 @@ def _compute_metrics(result: dict) -> dict[str, Any]:
             "avg_cells_per_row": 0.0,
             "fill_rate": 0.0,
             "actionable_rate": 0.0,
+            "avg_actionable_fields": 0.0,
+            "official_site_rate": 0.0,
             "multi_source_rate": 0.0,
             "avg_aggregate_confidence": 0.0,
             "avg_source_diversity": 0.0,
@@ -118,6 +120,7 @@ def _compute_metrics(result: dict) -> dict[str, Any]:
     # Per-row stats
     cells_per_row = []
     actionable_counts = []
+    official_site_flags = []
     multi_source_flags = []
     agg_confidences = []
     diversities = []
@@ -132,6 +135,7 @@ def _compute_metrics(result: dict) -> dict[str, Any]:
             1 for col in cells if col.lower() in _ACTIONABLE_COLS
         )
         actionable_counts.append(actionable)
+        official_site_flags.append(1 if row.get("canonical_domain") else 0)
 
         # Multi-source: >1 distinct source URL across cells
         source_urls = {
@@ -175,6 +179,12 @@ def _compute_metrics(result: dict) -> dict[str, Any]:
         "actionable_rate": round(
             sum(1 for a in actionable_counts if a > 0) / max(num_rows, 1), 3
         ),
+        "avg_actionable_fields": round(
+            statistics.mean(actionable_counts), 2
+        ) if actionable_counts else 0.0,
+        "official_site_rate": round(
+            statistics.mean(official_site_flags), 3
+        ) if official_site_flags else 0.0,
         "multi_source_rate": round(
             statistics.mean(multi_source_flags), 3
         ) if multi_source_flags else 0.0,
@@ -191,6 +201,9 @@ def _compute_metrics(result: dict) -> dict[str, Any]:
         "entities_extracted": meta.get("entities_extracted", 0),
         "entities_after_merge": meta.get("entities_after_merge", 0),
         "gap_fill_used": meta.get("gap_fill_used", False),
+        "query_family": meta.get("query_family", ""),
+        "normalized_query": meta.get("normalized_query", ""),
+        "pipeline_counts": meta.get("pipeline_counts", {}),
     }
 
 
@@ -248,6 +261,7 @@ def main() -> None:
             f"  {status_icon}  rows={metrics['rows_returned']}  "
             f"fill={metrics['fill_rate']:.0%}  "
             f"actionable={metrics['actionable_rate']:.0%}  "
+            f"official={metrics['official_site_rate']:.0%}  "
             f"multi_src={metrics['multi_source_rate']:.0%}  "
             f"conf={metrics['avg_aggregate_confidence']:.2f}  "
             f"diversity={metrics['avg_source_diversity']:.2f}  "
@@ -268,6 +282,8 @@ def main() -> None:
             "avg_rows": round(statistics.mean(r["rows_returned"] for r in done), 1),
             "avg_fill_rate": round(statistics.mean(r["fill_rate"] for r in done), 3),
             "avg_actionable_rate": round(statistics.mean(r["actionable_rate"] for r in done), 3),
+            "avg_actionable_fields": round(statistics.mean(r["avg_actionable_fields"] for r in done), 2),
+            "avg_official_site_rate": round(statistics.mean(r["official_site_rate"] for r in done), 3),
             "avg_multi_source_rate": round(statistics.mean(r["multi_source_rate"] for r in done), 3),
             "avg_confidence": round(statistics.mean(r["avg_aggregate_confidence"] for r in done), 3),
             "avg_diversity": round(statistics.mean(r["avg_source_diversity"] for r in done), 3),
@@ -294,11 +310,13 @@ def main() -> None:
     if results:
         fieldnames = [
             "query_id", "query", "category", "status", "rows_returned",
-            "avg_cells_per_row", "fill_rate", "actionable_rate",
+            "avg_cells_per_row", "fill_rate", "actionable_rate", "avg_actionable_fields",
+            "official_site_rate",
             "multi_source_rate", "avg_aggregate_confidence",
             "avg_source_diversity", "duration_seconds", "wall_time",
             "pages_scraped", "pages_after_rerank", "rerank_scorer",
             "entities_extracted", "entities_after_merge", "gap_fill_used",
+            "query_family", "normalized_query",
         ]
         with open(csv_path, "w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
