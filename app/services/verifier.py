@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import re
 from urllib.parse import urlparse
 
+from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.models.schema import EntityRow, PlannerOutput
 from app.services.field_validator import normalize_website
@@ -21,6 +23,73 @@ _HIGH_INTENT_TERMS = (
     "highest rated",
     "must visit",
     "must-visit",
+)
+
+# ── Name-shape rejection patterns ─────────────────────────────────────────────
+
+# Entity names that are clearly CTA or navigation text, not real entities.
+# Matches phrases like "Order Online", "Book Now", "Sign Up Free", "Learn More".
+#
+# Design: be explicit about allowed verb + suffix combinations rather than
+# using a generic `(?:\s+\w+)*` suffix, which would match proper nouns like
+# "Order of the Phoenix" or "Book Club Cafe".
+_CTA_SUFFIXES = (
+    r"(?:\s+(?:now|free|online|here|today|us|all|more|it|them|"
+    r"your|yours|in|out|up|started|forward|available|a\s+table|"
+    r"a\s+demo|a\s+quote|a\s+seat|directions?|menu|details?|"
+    r"the\s+(?:app|menu|pdf|guide)|for\s+free))?"
+)
+_CTA_PATTERN = re.compile(
+    r"^(?:"
+    r"order" + _CTA_SUFFIXES + r"|"
+    r"buy" + _CTA_SUFFIXES + r"|"
+    r"book" + _CTA_SUFFIXES + r"|"
+    r"sign\s+up" + _CTA_SUFFIXES + r"|"
+    r"get\s+started" + _CTA_SUFFIXES + r"|"
+    r"learn\s+more" + _CTA_SUFFIXES + r"|"
+    r"read\s+more" + _CTA_SUFFIXES + r"|"
+    r"view\s+(?:all|more|menu|details?|directions?)" + r"|"
+    r"see\s+(?:all|more|menu|details?)" + r"|"
+    r"click\s+here|"
+    r"contact\s+us|"
+    r"call\s+(?:us|now)" + _CTA_SUFFIXES + r"|"
+    r"reserve\s+(?:a\s+)?(?:table|seat|spot|now|online)|"
+    r"explore\s+(?:more|now|all)|"
+    r"watch\s+(?:now|the\s+video)|"
+    r"download" + _CTA_SUFFIXES + r"|"
+    r"subscribe" + _CTA_SUFFIXES + r"|"
+    r"add\s+to\s+(?:cart|bag|wishlist)|"
+    r"shop\s+(?:now|all)|"
+    r"find\s+(?:out\s+more|us\s+on)|"
+    r"access" + _CTA_SUFFIXES + r"|"
+    r"visit\s+us|"
+    r"check\s+(?:out|availability)|"
+    r"browse\s+(?:all|more)|"
+    r"try\s+(?:it\s+)?(?:free|now)|"
+    r"get\s+(?:it|them|access|yours|directions?|the\s+app)|"
+    r"apply\s+(?:now|online)|"
+    r"register" + _CTA_SUFFIXES + r"|"
+    r"see\s+directions?"
+    r")$",
+    re.IGNORECASE,
+)
+
+# Article-title patterns: "Best X in Y", "Top 10 X", "The 7 Best X", etc.
+# These are list-article headings, not entity names.
+_ARTICLE_TITLE_PATTERN = re.compile(
+    r"^(?:the\s+)?(?:\d+\s+)?(?:best|top|worst|greatest|biggest|leading|most\s+\w+|"
+    r"popular|famous|notable|must[-\s](?:try|visit|see|have)|highest[-\s]rated|"
+    r"award[-\s]winning)\s+\w",
+    re.IGNORECASE,
+)
+
+# Operational / hours / price strings that are definitely not entity names.
+_OPERATIONAL_PATTERN = re.compile(
+    r"^(?:(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*[\s,\-]+|"
+    r"open\s+(?:daily|now|until|monday)|closed\s+(?:on|monday)|"
+    r"hours?:|free\s+(?:delivery|shipping|parking)|"
+    r"\$\d[\d.,]*(?:\s*[-–]\s*\$\d[\d.,]*)?$)",
+    re.IGNORECASE,
 )
 
 _PSEUDO_ENTITY_TERMS = {
@@ -133,9 +202,48 @@ def _looks_like_pseudo_entity(row: EntityRow, plan: PlannerOutput, profile: dict
     return _website_points_back_to_non_entity_source(row) or row.sources_count < 3
 
 
+def _looks_like_cta_or_operational(name: str) -> bool:
+    """True when the entity name is clearly a CTA phrase or operational string."""
+    stripped = name.strip()
+    if not stripped:
+        return False
+    if _CTA_PATTERN.match(stripped):
+        return True
+    # Operational strings are typically short (≤6 words).
+    if len(stripped.split()) <= 6 and _OPERATIONAL_PATTERN.match(stripped):
+        return True
+    return False
+
+
+def _looks_like_article_title(name: str) -> bool:
+    """True when the entity name matches a list-article heading pattern.
+
+    Two-word and three-word names are excluded even if they start with
+    superlative words, because real brands like "Best Buy" or venues like
+    "Top Hat Lounge" legitimately start with those words.  Article titles
+    are longer (≥4 words) or contain a number ("Top 10 ...").
+    """
+    stripped = name.strip()
+    word_count = len(stripped.split())
+    # Short names starting with superlatives are usually proper nouns, not
+    # article titles.  Only flag if the name is long enough or has a number.
+    if word_count < 4 and not re.search(r"\d", stripped):
+        return False
+    return bool(_ARTICLE_TITLE_PATTERN.match(stripped))
+
+
 def _verify_row(row: EntityRow, plan: PlannerOutput, query: str) -> tuple[bool, str]:
     if is_row_obviously_bad(row, plan):
         return False, "not_viable"
+
+    name_cell = row.cells.get("name")
+    name_value = name_cell.value.strip() if name_cell else ""
+
+    if name_value and _looks_like_cta_or_operational(name_value):
+        return False, "cta_text"
+
+    if name_value and _looks_like_article_title(name_value):
+        return False, "article_title"
 
     strict_query = _query_is_strict(query)
     source_quality = row_source_quality(row)
@@ -172,6 +280,7 @@ def verify_rows(
     """
     Filter weak rows using source and evidence heuristics.
     Falls back to the original set if every row would be removed.
+    Applies a final row cap to prevent bloated result tables.
     """
     verified: list[EntityRow] = []
     rejected: list[tuple[str, str]] = []
@@ -189,8 +298,17 @@ def verify_rows(
             log.info("Verifier kept %d/%d rows; rejected=%s", len(verified), len(rows), preview)
         else:
             log.info("Verifier kept all %d rows", len(rows))
-        return verified
+    else:
+        if rows:
+            log.info("Verifier rejected all rows; falling back to original %d rows", len(rows))
+        verified = list(rows)
 
-    if rows:
-        log.info("Verifier rejected all rows; falling back to original %d rows", len(rows))
-    return rows
+    # Apply final row cap.  Strict ("best/top") queries get a tighter cap.
+    settings = get_settings()
+    strict_query = _query_is_strict(query)
+    cap = settings.max_strict_query_rows if strict_query else settings.max_final_rows
+    if len(verified) > cap:
+        log.info("Capping final rows: %d → %d (strict_query=%s)", len(verified), cap, strict_query)
+        verified = verified[:cap]
+
+    return verified

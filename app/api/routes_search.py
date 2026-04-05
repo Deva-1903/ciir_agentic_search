@@ -116,7 +116,7 @@ async def _run_pipeline(job_id: str, query: str) -> None:
             )
             stage_timings_ms["reranking"] = round((time.monotonic() - stage_start) * 1000, 1)
         else:
-            rerank_info = {"scorer": None, "pages_after": pages_scraped}
+            rerank_info = {"scorer": "disabled", "pages_after": pages_scraped}
         pipeline_counts["pages_after_rerank"] = len(pages_for_discovery)
 
         # 4. Candidate discovery
@@ -141,8 +141,11 @@ async def _run_pipeline(job_id: str, query: str) -> None:
         pipeline_counts["chunks_extracted"] = extraction_stats.get("chunks_seen", 0)
         pipeline_counts["pages_extracted"] = extraction_stats.get("pages_seen", 0)
         pipeline_counts["pages_with_entities"] = extraction_stats.get("pages_with_entities", 0)
+        # provider_fallback_attempts is per-chunk (one page may have 2 chunks).
+        # provider_fallback_pages is a coarser but more intuitive per-page count.
         pipeline_counts["provider_fallback_attempts"] = extraction_stats.get("provider_fallback_attempts", 0)
         pipeline_counts["provider_fallback_successes"] = extraction_stats.get("provider_fallback_successes", 0)
+        pipeline_counts["provider_skipped_cooldown"] = extraction_stats.get("provider_skipped_cooldown", 0)
         pipeline_counts["entities_before_merge"] = entities_extracted
         pipeline_counts["pages_routed_deterministic"] = extraction_stats.get("pages_routed_deterministic", 0)
         pipeline_counts["pages_routed_hybrid"] = extraction_stats.get("pages_routed_hybrid", 0)

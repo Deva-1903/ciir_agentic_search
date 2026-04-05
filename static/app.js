@@ -288,10 +288,15 @@ document.querySelectorAll(".example-chip").forEach((btn) => {
 
 // ── Polling ────────────────────────────────────────────────────────────────
 let _pollErrors = 0;
+let _poll404Count = 0;
 const _MAX_POLL_ERRORS = 8;
+// After 2 consecutive 404s the job is gone (container restart / rolling deploy).
+// Don't make the reviewer wait 16 seconds to learn this.
+const _MAX_POLL_404S = 2;
 
 function startPolling() {
   _pollErrors = 0;
+  _poll404Count = 0;
   pollTimer = setInterval(pollJob, 2000);
   pollJob();
 }
@@ -301,10 +306,32 @@ async function pollJob() {
 
   try {
     const res = await fetch(`/api/search/${currentJobId}`);
+
+    // 404 means the job record is gone — most likely a container restart or
+    // rolling deploy cycled the in-process SQLite store.  Give it one retry
+    // grace before surfacing the honest message.
+    if (res.status === 404) {
+      _poll404Count++;
+      if (_poll404Count >= _MAX_POLL_404S) {
+        clearInterval(pollTimer);
+        stopElapsedTimer();
+        hide(tracker);
+        searchBtn.disabled = false;
+        showError(
+          "Job not found — the server restarted while your search was running. " +
+          "Please search again.",
+        );
+      } else {
+        console.warn(`Poll 404 (${_poll404Count}/${_MAX_POLL_404S}) — waiting for job to appear`);
+      }
+      return;
+    }
+
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const job = await res.json();
 
     _pollErrors = 0;
+    _poll404Count = 0;
     updatePipelineTracker(job.phase || job.status);
 
     if (job.status === "done") {
@@ -421,7 +448,7 @@ function renderRetrievalPlan(data, m) {
     html += "</ul></div>";
   }
 
-  if (m.rerank_scorer) {
+  if (m.rerank_scorer && m.rerank_scorer !== "disabled") {
     html += '<div class="plan-rerank">';
     html += `<span class="plan-label">Reranking:</span> `;
     html += `${m.pages_scraped} pages → ${m.pages_after_rerank} selected (${esc(m.rerank_scorer)})`;
@@ -450,7 +477,7 @@ function renderQualityControls(m) {
       text: `Constrained schema selected from query family: ${m.query_family}`,
     });
   }
-  if (m.rerank_scorer) {
+  if (m.rerank_scorer && m.rerank_scorer !== "disabled") {
     items.push({
       icon: "⚡",
       text: `Cross-encoder reranking: ${m.pages_scraped} → ${m.pages_after_rerank} pages`,
@@ -539,9 +566,7 @@ function renderRunStats(m) {
   if (m.normalized_query && m.normalized_query !== (m.original_query || currentQuery)) {
     rows.splice(2, 0, ["Normalized query", m.normalized_query]);
   }
-  if (m.rerank_scorer) {
-    rows.push(["Rerank scorer", m.rerank_scorer]);
-  }
+  rows.push(["Rerank scorer", m.rerank_scorer || "disabled"]);
 
   let html = '<table class="stats-table">';
   for (const [label, val] of rows) {

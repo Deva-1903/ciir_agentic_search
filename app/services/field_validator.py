@@ -20,6 +20,16 @@ from urllib.parse import urlparse, urlunparse
 from app.services.source_quality import classify_source, is_curated_third_party
 from app.utils.url import extract_domain
 
+# Placeholder / filler values an LLM may emit when it has no grounded evidence.
+# These are meaningless and should be dropped from any column.
+_PLACEHOLDER_VALUES = {
+    "n/a", "na", "not applicable", "not available", "not specified",
+    "not found", "not provided", "not stated", "not listed",
+    "unknown", "unspecified", "none", "null", "tbd", "tba",
+    "pending", "coming soon", "to be determined", "to be announced",
+    "—", "–", "-", "...", "…", "?", "??",
+}
+
 # Column name sets — driven by field semantics, not domain.
 # Structural columns that typically hold an entity's canonical URL.
 _WEBSITE_COLS = {
@@ -270,6 +280,10 @@ def validate_and_normalize(
         return str(value), False
     stripped = value.strip()
     if not stripped:
+        return value, False
+
+    # Reject placeholder/filler values regardless of column type.
+    if stripped.lower() in _PLACEHOLDER_VALUES:
         return value, False
 
     col_l = col.lower()

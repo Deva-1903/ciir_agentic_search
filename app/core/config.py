@@ -59,6 +59,11 @@ class Settings(BaseSettings):
     cell_verifier_enabled: bool = True
     source_diversity_weight: float = 0.08
 
+    # Final row caps — prevents bloated tables in reviewer demo.
+    # max_strict_query_rows applies when query contains "best", "top", etc.
+    max_final_rows: int = 20
+    max_strict_query_rows: int = 15
+
     # DB — lives outside the project root so --reload doesn't detect SQLite
     # writes as file changes and restart the worker mid-pipeline
     db_path: str = "/tmp/agentic_search.db"

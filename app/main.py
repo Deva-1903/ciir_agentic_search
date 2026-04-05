@@ -36,6 +36,14 @@ async def lifespan(app: FastAPI):
         settings.planner_provider, planner_model,
         settings.extractor_provider, extractor_model,
     )
+    if settings.app_env == "production":
+        log.warning(
+            "Job state is stored in local SQLite at %s. "
+            "This is per-container: jobs created on one container are NOT visible to "
+            "other containers. Run with instance_count=1 and avoid rolling deploys "
+            "while searches are in flight to prevent 404 polling errors.",
+            settings.db_path,
+        )
     await init_db()
     yield
     log.info("Shutting down")

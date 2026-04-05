@@ -13,6 +13,7 @@ The extractor never invents missing values: it omits unsupported fields.
 from __future__ import annotations
 
 import asyncio
+import time as _time
 from typing import Optional
 
 from app.core.config import get_settings
@@ -30,6 +31,22 @@ from app.services.llm import chat_json
 from app.utils.text import chunk_text, truncate
 
 log = get_logger(__name__)
+
+# ── Provider cooldown (in-process circuit breaker) ────────────────────────────
+# After a provider raises an exception, skip it for this many seconds.
+# Prevents all concurrent chunks from hammering a rate-limited provider.
+_PROVIDER_COOLDOWN_SECONDS = 60.0
+_provider_failure_time: dict[str, float] = {}
+
+
+def _provider_on_cooldown(provider: str) -> bool:
+    last_fail = _provider_failure_time.get(provider, 0.0)
+    return (_time.monotonic() - last_fail) < _PROVIDER_COOLDOWN_SECONDS
+
+
+def _record_provider_failure(provider: str) -> None:
+    _provider_failure_time[provider] = _time.monotonic()
+    log.warning("Provider %s entered cooldown for %.0fs", provider, _PROVIDER_COOLDOWN_SECONDS)
 
 # ── Prompts ───────────────────────────────────────────────────────────────────
 
@@ -223,6 +240,10 @@ async def _extract_from_chunk(
     primary_provider = provider_order[0]
 
     for idx, provider in enumerate(provider_order):
+        if _provider_on_cooldown(provider):
+            _bump_stat(stats, "provider_skipped_cooldown")
+            log.info("Skipping provider %s — on cooldown after recent failure", provider)
+            continue
         _bump_stat(stats, "llm_calls_attempted")
         try:
             raw = await chat_json(
@@ -235,7 +256,7 @@ async def _extract_from_chunk(
                 provider=provider,
                 usage_stats=stats,
             )
-            if idx > 0:
+            if idx > 0 or provider != primary_provider:
                 _bump_stat(stats, "provider_fallback_successes")
                 log.warning(
                     "Extraction recovered for %s via fallback provider %s after %s failed",
@@ -245,6 +266,7 @@ async def _extract_from_chunk(
                 )
             break
         except Exception as exc:
+            _record_provider_failure(provider)
             if idx + 1 < len(provider_order):
                 next_provider = provider_order[idx + 1]
                 _bump_stat(stats, "provider_fallback_attempts")

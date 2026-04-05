@@ -74,9 +74,23 @@ def _sanitize_existing_website(row: EntityRow, canonical_domain: str | None = No
 
 
 def _mentions_entity(page: ScrapedPage, normalized_entity_name: str) -> bool:
+    """
+    Return True only when the page is specifically about this entity.
+
+    We require:
+      1. The entity name appears in the page title, OR
+      2. The entity name appears in the first 200 characters of body text
+         (not 500 — 500 chars often contain multiple entity mentions on
+         list/review pages, causing wrong official-site attachment).
+    """
+    if not normalized_entity_name or len(normalized_entity_name) < 2:
+        return False
     title_match = normalized_entity_name in normalize_name(page.title or "")
-    head_text = normalize_name((page.cleaned_text or "")[:500])
-    return title_match or normalized_entity_name in head_text
+    if title_match:
+        return True
+    # Short body window — the entity must be named very prominently.
+    head_text = normalize_name((page.cleaned_text or "")[:200])
+    return normalized_entity_name in head_text
 
 
 def _looks_like_listing_page(page: ScrapedPage) -> bool:

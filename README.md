@@ -12,9 +12,15 @@ For the full iteration log and engineering decisions, see [BUILD_JOURNAL.md](./B
 - Plans a constrained schema, searches multiple retrieval angles, detects page evidence regimes, and uses deterministic extractors before LLM fallback.
 - Merges duplicates, resolves official sites, fills missing fields, verifies cells, ranks rows, and returns structured output with provenance.
 
+## Live Demo
+
+**[https://agentic-search-uij3k.ondigitalocean.app/](https://agentic-search-uij3k.ondigitalocean.app/)**
+
+No setup required — enter any query and explore the results, provenance, and run stats directly.
+
 ## Reviewer Path
 
-1. Start the app and open `http://localhost:8000`.
+1. Open the [live demo](https://agentic-search-uij3k.ondigitalocean.app/) or start the app locally at `http://localhost:8000`.
 2. Run 2-3 sample queries from the list below.
 3. Click cells in the UI to inspect `source_url`, `evidence_snippet`, and `confidence`, or export JSON/CSV.
 4. Read [BUILD_JOURNAL.md](./BUILD_JOURNAL.md) for the deeper engineering story and iteration history.
@@ -51,6 +57,8 @@ The app stores its SQLite cache/job database at `/tmp/agentic_search.db`.
 - **Evidence-regime adaptation**: pages are classified as official sites, directories, editorial articles, local-business listings, software repo/docs pages, marketplaces, or unknown.
 - **Deterministic before LLM**: repo/docs pages, official pages, and list pages use deterministic or semi-deterministic extractors before falling back to the LLM.
 - **Late quality controls**: merge/canonicalization, official-site resolution, gap-fill, cell verification, verifier filtering, and intent-aware ranking all operate on grounded evidence.
+- **Generalizable filtering**: CTA/nav text, article-title-shaped names, and LLM placeholder values ("N/A", "Unknown") are rejected before output. Row counts are capped for "best/top" queries.
+- **Provider reliability**: a per-provider in-process cooldown prevents churn between a timed-out primary provider and a rate-limited fallback within the same run.
 - **Reviewer-facing UX**: the UI exposes the retrieval plan, phase tracker, trust badges, run stats, and evidence modal instead of hiding the pipeline behind a single table.
 
 ## Build Journal
@@ -115,7 +123,7 @@ Deployment files:
 ### Notes for this deploy
 
 - The app already exposes a health endpoint at `/api/health`.
-- SQLite state is intentionally temporary in this deployment. The cache/job DB lives at `/tmp/agentic_search.db`, so it may reset on redeploys or instance replacement.
+- **Single-instance requirement**: Job state is stored in local SQLite at `/tmp/agentic_search.db`. This is per-container. Keep `instance_count: 1` (already set in `app.yaml`) and avoid running rolling deploys while searches are in flight. If a container restarts mid-search, the polling client will receive a 404 and display a clear "server restarted, please search again" message.
 - `GROQ_API_KEY`, `OPENAI_BASE_URL`, and JS-render settings are optional. They are not required for the default reviewer demo path.
 
 ## Example Queries
