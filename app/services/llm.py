@@ -1,7 +1,7 @@
 """
 Thin wrapper around the OpenAI-compatible chat completions API.
 
-Supports Groq (primary) and OpenAI (fallback) via base URL switching.
+Supports OpenAI and Groq via base URL switching.
 
 Handles:
 - JSON mode responses

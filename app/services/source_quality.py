@@ -13,6 +13,8 @@ from app.utils.url import extract_domain
 SourceKind = Literal["official", "editorial", "directory", "marketplace", "unknown"]
 
 _EDITORIAL_DOMAINS = {
+    "arstechnica.com",
+    "cnet.com",
     "eater.com",
     "foodandwine.com",
     "grubstreet.com",
@@ -21,10 +23,14 @@ _EDITORIAL_DOMAINS = {
     "nytimes.com",
     "seriouseats.com",
     "tastingtable.com",
+    "techcrunch.com",
     "theinfatuation.com",
+    "theverge.com",
     "thrillist.com",
     "timeout.com",
     "vogue.com",
+    "wired.com",
+    "zdnet.com",
 }
 
 _DIRECTORY_DOMAINS = {

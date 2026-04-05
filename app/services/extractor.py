@@ -283,7 +283,12 @@ async def _extract_from_chunk(
             conf = float(cell_data.get("confidence", 0.5))
             conf = max(0.0, min(1.0, conf))
             if value and snippet:
-                normalized, ok = validate_and_normalize(col, value)
+                normalized, ok = validate_and_normalize(
+                    col,
+                    value,
+                    source_url=page.url,
+                    source_title=page.title or None,
+                )
                 if not ok:
                     log.debug("Dropping malformed cell %s=%r (page=%s)", col, value, page.url)
                     continue

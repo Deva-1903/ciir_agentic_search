@@ -20,14 +20,14 @@ class Settings(BaseSettings):
     openai_model: str = "gpt-4o-mini"
     openai_base_url: Optional[str] = None  # None → use default OpenAI URL
 
-    # Groq (fast extraction via OpenAI-compatible API)
+    # Groq (optional alternate extractor via OpenAI-compatible API)
     groq_api_key: str = ""
     groq_model: str = "llama-3.3-70b-versatile"
     groq_base_url: str = "https://api.groq.com/openai/v1"
 
     # Provider routing — which provider each pipeline stage uses
     planner_provider: str = "openai"
-    extractor_provider: str = "groq"
+    extractor_provider: str = "openai"
 
     # App
     app_env: str = "development"

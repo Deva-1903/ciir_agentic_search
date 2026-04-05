@@ -70,3 +70,70 @@ def test_resolve_official_site_keeps_existing_better_website():
 
     assert resolved == 0
     assert rows[0].cells["website"].value == "https://lucali.com/"
+
+
+def test_resolve_official_site_replaces_editorial_article_website():
+    row = EntityRow(
+        entity_id="lucali",
+        cells={
+            "name": _cell("Lucali"),
+            "website": Cell(
+                value="https://www.theinfatuation.com/new-york/reviews/lucali",
+                source_url="https://www.theinfatuation.com/new-york/reviews/lucali",
+                source_title="Lucali Review",
+                evidence_snippet="Lucali Review",
+                confidence=0.99,
+            ),
+        },
+        aggregate_confidence=0.9,
+        sources_count=1,
+    )
+    pages = [
+        ScrapedPage(
+            url="https://lucali.com/contact",
+            title="Contact Lucali",
+            cleaned_text="Lucali 575 Henry St Brooklyn NY 11231.",
+        )
+    ]
+
+    rows, resolved = resolve_official_sites([row], pages)
+
+    assert resolved == 1
+    assert rows[0].cells["website"].value == "https://lucali.com/"
+
+
+def test_resolve_official_site_does_not_bootstrap_directory_root_as_canonical():
+    row = EntityRow(
+        entity_id="ai-copilots-agents-for-psychiatry",
+        cells={
+            "name": Cell(
+                value="AI Copilots & Agents for Psychiatry",
+                source_url="https://topstartups.io/?industries=Healthcare",
+                source_title="Find Top Startups",
+                evidence_snippet="Building AI Copilots & Agents for Psychiatry.",
+                confidence=0.9,
+            ),
+            "website": Cell(
+                value="https://topstartups.io/",
+                source_url="https://topstartups.io/?industries=Healthcare",
+                source_title="Find Top Startups",
+                evidence_snippet="Find Top Startups",
+                confidence=0.7,
+            ),
+        },
+        aggregate_confidence=0.8,
+        sources_count=1,
+    )
+    pages = [
+        ScrapedPage(
+            url="https://topstartups.io/?industries=Healthcare",
+            title="Find Top Startups",
+            cleaned_text="Building AI Copilots & Agents for Psychiatry.",
+        )
+    ]
+
+    rows, resolved = resolve_official_sites([row], pages)
+
+    assert resolved == 0
+    assert rows[0].canonical_domain is None
+    assert "website" not in rows[0].cells

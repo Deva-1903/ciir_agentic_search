@@ -23,7 +23,7 @@ def _make_settings(**overrides) -> Settings:
         groq_model="llama-3.3-70b-versatile",
         groq_base_url="https://api.groq.com/openai/v1",
         planner_provider="openai",
-        extractor_provider="groq",
+        extractor_provider="openai",
     )
     defaults.update(overrides)
     return Settings(**defaults)
@@ -45,10 +45,10 @@ def test_provider_config_returns_groq():
     assert base_url == "https://api.groq.com/openai/v1"
 
 
-def test_default_routing_is_openai_planner_groq_extractor():
+def test_default_routing_is_openai_for_planner_and_extractor():
     s = _make_settings()
     assert s.planner_provider == "openai"
-    assert s.extractor_provider == "groq"
+    assert s.extractor_provider == "openai"
 
 
 def test_routing_can_be_overridden():
@@ -127,7 +127,7 @@ async def test_extractor_passes_extractor_provider(monkeypatch):
         lambda: SimpleNamespace(
             extract_llm_timeout_seconds=30.0,
             extract_llm_max_attempts=1,
-            extractor_provider="groq",
+            extractor_provider="openai",
         ),
     )
 
@@ -135,4 +135,4 @@ async def test_extractor_passes_extractor_provider(monkeypatch):
     page = ScrapedPage(url="https://example.com", title="Ex", cleaned_text="text")
     await extractor._extract_from_chunk("test", plan, page, "chunk")
 
-    assert captured_kwargs.get("provider") == "groq"
+    assert captured_kwargs.get("provider") == "openai"

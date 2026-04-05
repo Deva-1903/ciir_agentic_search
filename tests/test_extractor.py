@@ -26,7 +26,7 @@ async def test_extract_from_chunk_uses_extraction_timeout_settings(monkeypatch):
         lambda: SimpleNamespace(
             extract_llm_timeout_seconds=12.5,
             extract_llm_max_attempts=1,
-            extractor_provider="groq",
+            extractor_provider="openai",
         ),
     )
 
@@ -65,7 +65,7 @@ async def test_extract_from_chunk_backfills_name_cell(monkeypatch):
         lambda: SimpleNamespace(
             extract_llm_timeout_seconds=12.5,
             extract_llm_max_attempts=1,
-            extractor_provider="groq",
+            extractor_provider="openai",
         ),
     )
 
@@ -160,7 +160,7 @@ async def test_extract_from_chunk_preserves_multiple_entities(monkeypatch):
         lambda: SimpleNamespace(
             extract_llm_timeout_seconds=30.0,
             extract_llm_max_attempts=1,
-            extractor_provider="groq",
+            extractor_provider="openai",
         ),
     )
 
@@ -181,7 +181,7 @@ async def test_extract_from_chunk_falls_back_to_secondary_provider(monkeypatch):
     async def fake_chat_json(system: str, user: str, **kwargs):
         provider = kwargs["provider"]
         providers_seen.append(provider)
-        if provider == "groq":
+        if provider == "openai":
             raise RuntimeError("rate_limit_exceeded")
         return {
             "entities": [
@@ -205,11 +205,11 @@ async def test_extract_from_chunk_falls_back_to_secondary_provider(monkeypatch):
         lambda: SimpleNamespace(
             extract_llm_timeout_seconds=30.0,
             extract_llm_max_attempts=1,
-            extractor_provider="groq",
+            extractor_provider="openai",
             provider_config=lambda provider: (
-                "groq-key" if provider == "groq" else "openai-key",
+                "openai-key" if provider == "openai" else "groq-key",
                 "model",
-                None,
+                None if provider == "openai" else "https://api.groq.com/openai/v1",
             ),
         ),
     )
@@ -226,7 +226,7 @@ async def test_extract_from_chunk_falls_back_to_secondary_provider(monkeypatch):
         stats=stats,
     )
 
-    assert providers_seen == ["groq", "openai"]
+    assert providers_seen == ["openai", "groq"]
     assert len(drafts) == 1
     assert drafts[0].entity_name == "Lucali"
     assert stats["llm_calls_attempted"] == 2

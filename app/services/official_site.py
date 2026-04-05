@@ -6,6 +6,7 @@ from urllib.parse import urlparse
 
 from app.core.logging import get_logger
 from app.models.schema import Cell, EntityRow, ScrapedPage
+from app.services.field_validator import normalize_website
 from app.services.merger import _pick_better_cell
 from app.services.source_quality import classify_source
 from app.utils.text import normalize_name, truncate
@@ -15,6 +16,9 @@ log = get_logger(__name__)
 
 _OFFICIAL_HINTS = ("official", "about", "contact", "menu", "locations", "location")
 _WEBSITE_COLS = {"website", "url", "official_website", "homepage", "link"}
+_LISTING_PATH_HINTS = ("/category", "/categories", "/companies", "/directory", "/industry", "/list", "/lists")
+_LISTING_QUERY_HINTS = ("category=", "categories=", "industry=", "industries=")
+_LISTING_TITLE_HINTS = ("find top startups", "directory", "industry", "companies", "category")
 
 
 def _canonical_homepage(url: str) -> str:
@@ -32,10 +36,54 @@ def _current_website(row: EntityRow) -> str | None:
     return None
 
 
+def _set_website_cell(row: EntityRow, website: Cell) -> None:
+    row.cells["website"] = website
+
+
+def _sanitize_existing_website(row: EntityRow, canonical_domain: str | None = None) -> None:
+    existing = row.cells.get("website")
+    if not existing:
+        return
+
+    normalized, ok = normalize_website(
+        existing.value,
+        source_url=existing.source_url,
+        source_title=existing.source_title,
+        canonical_domain=canonical_domain or row.canonical_domain,
+    )
+    if not ok:
+        row.cells.pop("website", None)
+        return
+
+    if normalized != existing.value:
+        _set_website_cell(
+            row,
+            Cell(
+                value=normalized,
+                source_url=existing.source_url,
+                source_title=existing.source_title,
+                evidence_snippet=existing.evidence_snippet,
+                confidence=existing.confidence,
+            ),
+        )
+
+
 def _mentions_entity(page: ScrapedPage, normalized_entity_name: str) -> bool:
     title_match = normalized_entity_name in normalize_name(page.title or "")
     head_text = normalize_name((page.cleaned_text or "")[:500])
     return title_match or normalized_entity_name in head_text
+
+
+def _looks_like_listing_page(page: ScrapedPage) -> bool:
+    parsed = urlparse(page.url)
+    path_l = parsed.path.lower()
+    query_l = parsed.query.lower()
+    title_l = (page.title or "").lower()
+    return (
+        any(hint in path_l for hint in _LISTING_PATH_HINTS)
+        or any(hint in query_l for hint in _LISTING_QUERY_HINTS)
+        or any(hint in title_l for hint in _LISTING_TITLE_HINTS)
+    )
 
 
 def _page_score_for_entity(row: EntityRow, page: ScrapedPage) -> float:
@@ -49,8 +97,11 @@ def _page_score_for_entity(row: EntityRow, page: ScrapedPage) -> float:
 
     if not _mentions_entity(page, normalized_entity_name):
         return 0.0
+    if _looks_like_listing_page(page):
+        return 0.0
 
-    kind, quality = classify_source(page.url, page.title, _current_website(row))
+    official_hint_url = f"https://{row.canonical_domain}/" if row.canonical_domain else None
+    kind, quality = classify_source(page.url, page.title, official_hint_url)
     if kind in {"editorial", "directory", "marketplace"}:
         return 0.0
 
@@ -82,6 +133,7 @@ def resolve_official_sites(
     resolved = 0
 
     for row in rows:
+        _sanitize_existing_website(row)
         best_page: ScrapedPage | None = None
         best_score = 0.0
         for page in pages:
@@ -108,9 +160,26 @@ def resolve_official_sites(
 
         existing = row.cells.get("website")
         if existing:
-            row.cells["website"] = _pick_better_cell(existing, website_cell)
+            normalized_existing, ok = normalize_website(
+                existing.value,
+                source_url=existing.source_url,
+                source_title=existing.source_title,
+                canonical_domain=domain,
+            )
+            if not ok or extract_domain(normalized_existing) != domain or normalized_existing != homepage:
+                _set_website_cell(row, website_cell)
+            else:
+                if normalized_existing != existing.value:
+                    existing = Cell(
+                        value=normalized_existing,
+                        source_url=existing.source_url,
+                        source_title=existing.source_title,
+                        evidence_snippet=existing.evidence_snippet,
+                        confidence=existing.confidence,
+                    )
+                _set_website_cell(row, _pick_better_cell(existing, website_cell))
         else:
-            row.cells["website"] = website_cell
+            _set_website_cell(row, website_cell)
 
         if row.canonical_domain != domain:
             row.canonical_domain = domain

@@ -11,10 +11,10 @@ from app.services.field_validator import (
 
 
 class TestWebsite:
-    def test_full_url_passes_and_lowercases_host(self):
+    def test_company_subpage_collapses_to_homepage(self):
         out, ok = normalize_website("HTTPS://Lucali.COM/menu")
         assert ok
-        assert out == "https://lucali.com/menu"
+        assert out == "https://lucali.com"
 
     def test_bare_domain_gets_https_prefix(self):
         out, ok = normalize_website("lucali.com")
@@ -24,8 +24,7 @@ class TestWebsite:
     def test_bare_domain_with_path_ok(self):
         out, ok = normalize_website("www.lucali.com/about")
         assert ok
-        assert out.startswith("https://")
-        assert "lucali.com" in out
+        assert out == "https://www.lucali.com"
 
     def test_fragment_without_tld_rejected(self):
         # This is the `robertaspizza` case from Iteration 7.
@@ -36,10 +35,35 @@ class TestWebsite:
         _, ok = normalize_website("")
         assert not ok
 
-    def test_drops_trailing_slash_and_fragment(self):
+    def test_drops_trailing_slash_fragment_and_canonicalizes_homepage(self):
         out, ok = normalize_website("https://x.com/about/#top")
         assert ok
-        assert out == "https://x.com/about"
+        assert out == "https://x.com"
+
+    def test_rejects_editorial_article_url_as_website(self):
+        _, ok = normalize_website(
+            "https://techcrunch.com/2026/04/04/company-launches-agent",
+            source_url="https://techcrunch.com/2026/04/04/company-launches-agent",
+            source_title="Company launches agent | TechCrunch",
+        )
+        assert not ok
+
+    def test_rejects_directory_listing_url_as_website(self):
+        _, ok = normalize_website(
+            "https://www.ycombinator.com/companies/industry/healthcare-it",
+            source_url="https://www.ycombinator.com/companies/industry/healthcare-it",
+            source_title="Healthcare IT Companies | Y Combinator",
+        )
+        assert not ok
+
+    def test_official_blog_url_collapses_to_homepage(self):
+        out, ok = normalize_website(
+            "https://www.owkin.com/blog/new-model-launch",
+            source_url="https://www.owkin.com/blog/new-model-launch",
+            source_title="Owkin Blog",
+        )
+        assert ok
+        assert out == "https://www.owkin.com"
 
 
 class TestPhone:
