@@ -1,4 +1,4 @@
-"""Tests for the constrained planner."""
+"""Tests for the constrained planner (structural entity-kind families)."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from app.services import planner
 
 
 def test_search_facet_type_is_normalized_to_canonical():
-    f = SearchFacet(type="Entity List", query="top pizza places")
+    f = SearchFacet(type="Entity List", query="top restaurants")
     assert f.type == "entity_list"
 
 
@@ -32,24 +32,59 @@ def test_sanitize_facets_drops_empty_queries_and_invalid_columns():
     assert cleaned[0].expected_fill_columns == ["name", "website"]
 
 
-def test_classify_query_family_local_business():
-    assert planner.classify_query_family("top pizza places in Brooklyn") == "local_business"
+def test_classify_query_family_place_venue_from_location_phrase():
+    # A concrete venue noun + location phrase → place_venue (structurally).
+    assert planner.classify_query_family("top pizza restaurants in Brooklyn") == "place_venue"
 
 
-def test_classify_query_family_startup():
-    assert planner.classify_query_family("AI startups in healthcare") == "startup_company"
+def test_classify_query_family_organization_company_for_startups():
+    # "startups" is an organizational signal, not a vertical-only tag.
+    assert planner.classify_query_family("AI startups in healthcare") == "organization_company"
 
 
-def test_classify_query_family_software_tool():
-    assert planner.classify_query_family("top open source databases for production use") == "software_tool"
+def test_classify_query_family_software_project_for_databases():
+    assert planner.classify_query_family("top open source databases for production use") == "software_project"
 
 
-def test_fallback_plan_uses_template_columns_and_family():
+def test_classify_query_family_product_offering_for_brands():
+    assert planner.classify_query_family("best noise cancelling headphone brands") == "product_offering"
+
+
+def test_classify_query_family_person_group():
+    assert planner.classify_query_family("notable climate researchers in 2024") == "person_group"
+
+
+def test_classify_query_family_generic_entity_list_fallback():
+    # No structural signal → generic_entity_list.
+    assert planner.classify_query_family("interesting phenomena worth knowing") == "generic_entity_list"
+
+
+def test_fallback_plan_uses_template_columns_for_organization_family():
     plan = planner._fallback_plan("AI startups in healthcare")
-    assert plan.query_family == "startup_company"
-    assert plan.entity_type == "startup"
-    assert plan.columns == ["name", "website", "headquarters", "focus_area", "product_or_service", "funding_stage"]
+    assert plan.query_family == "organization_company"
+    assert plan.columns == [
+        "name", "website", "headquarters",
+        "focus_area", "product_or_service", "stage_or_status",
+    ]
     assert plan.search_angles == [f.query for f in plan.facets]
+
+
+def test_fallback_plan_uses_place_venue_template_for_location_query():
+    plan = planner._fallback_plan("top pizza restaurants in Brooklyn")
+    assert plan.query_family == "place_venue"
+    assert plan.columns == [
+        "name", "website", "location",
+        "category", "offering", "contact_or_booking",
+    ]
+
+
+def test_fallback_plan_uses_software_template():
+    plan = planner._fallback_plan("top open source databases")
+    assert plan.query_family == "software_project"
+    assert plan.columns == [
+        "name", "website_or_repo", "primary_use_case",
+        "license", "language_or_stack", "maintainer_or_org",
+    ]
 
 
 @pytest.mark.asyncio
@@ -59,8 +94,7 @@ async def test_plan_schema_uses_deterministic_plan_when_llm_fails(monkeypatch):
 
     monkeypatch.setattr(planner, "chat_json_validated", boom)
     plan = await planner.plan_schema("pizza places in Brooklyn")
-    assert plan.query_family == "local_business"
-    assert plan.entity_type == "pizza place"
+    assert plan.query_family == "place_venue"
     assert "description" not in plan.columns
     assert plan.facets, "fallback should produce deterministic facets"
 
@@ -69,23 +103,27 @@ async def test_plan_schema_uses_deterministic_plan_when_llm_fails(monkeypatch):
 async def test_plan_schema_prefers_template_over_generic_entity_type(monkeypatch):
     async def fake_llm(system, user, model_class, **kwargs):
         return model_class(
-            entity_type="entity",
+            entity_type="entity",  # generic — should be rejected
             facets=[
                 SearchFacet(
                     type="entity_list",
                     query="top pizza places in Brooklyn",
-                    expected_fill_columns=["name", "address"],
+                    expected_fill_columns=["name", "location"],
                     rationale="discover candidates",
                 )
             ],
         )
 
     monkeypatch.setattr(planner, "chat_json_validated", fake_llm)
-    plan = await planner.plan_schema("top pizza places in Brooklyn")
+    plan = await planner.plan_schema("top pizza restaurants in Brooklyn")
 
-    assert plan.query_family == "local_business"
-    assert plan.entity_type == "pizza place"
-    assert plan.columns == ["name", "website", "address", "phone_number", "category", "rating"]
+    assert plan.query_family == "place_venue"
+    # Entity type falls back to the template default when LLM returns "entity".
+    assert plan.entity_type != "entity"
+    assert plan.columns == [
+        "name", "website", "location",
+        "category", "offering", "contact_or_booking",
+    ]
 
 
 @pytest.mark.asyncio
@@ -102,9 +140,9 @@ async def test_plan_schema_parses_llm_facet_output_and_keeps_template_schema(mon
                 ),
                 SearchFacet(
                     type="attribute_specific",
-                    query="AI healthcare startup series A funding",
-                    expected_fill_columns=["funding_stage", "bogus_col"],
-                    rationale="funding-focused pages",
+                    query="AI healthcare startup stage",
+                    expected_fill_columns=["stage_or_status", "bogus_col"],
+                    rationale="stage-focused pages",
                 ),
             ],
         )
@@ -112,9 +150,12 @@ async def test_plan_schema_parses_llm_facet_output_and_keeps_template_schema(mon
     monkeypatch.setattr(planner, "chat_json_validated", fake_llm)
     plan = await planner.plan_schema("AI startups in healthcare")
 
-    assert plan.query_family == "startup_company"
+    assert plan.query_family == "organization_company"
     assert plan.entity_type == "startup"
-    assert plan.columns == ["name", "website", "headquarters", "focus_area", "product_or_service", "funding_stage"]
+    assert plan.columns == [
+        "name", "website", "headquarters",
+        "focus_area", "product_or_service", "stage_or_status",
+    ]
     assert len(plan.facets) == 2
     assert plan.search_angles == [f.query for f in plan.facets]
     assert "bogus_col" not in plan.facets[1].expected_fill_columns

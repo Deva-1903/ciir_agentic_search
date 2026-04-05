@@ -24,6 +24,7 @@ from app.models.schema import (
     PlannerOutput,
     ScrapedPage,
 )
+from app.services.deterministic_extractors import extract_deterministic_entities
 from app.services.field_validator import validate_and_normalize
 from app.services.llm import chat_json
 from app.utils.text import chunk_text, truncate
@@ -164,24 +165,26 @@ def _extractor_provider_order(settings) -> list[str]:
 
 
 def build_candidate_discovery_plan(plan: PlannerOutput) -> PlannerOutput:
-    """Return a lighter-weight schema used for candidate discovery."""
-    preferred = ["name"]
-    for col in ("website", "address", "location", "phone_number", "phone", "category", "rating"):
-        if col in plan.columns and col not in preferred:
-            preferred.append(col)
+    """Return a lighter-weight schema used for candidate discovery.
 
-    # Ensure discovery mode still has at least one actionable field beside name.
-    if len(preferred) == 1:
-        for col in plan.columns:
-            if col != "name":
-                preferred.append(col)
-            if len(preferred) >= 4:
-                break
+    Discovery-first extraction is recall-oriented: it tries to surface every
+    plausible entity with a name and a couple of lightweight anchoring fields.
+    We take the first 4 schema columns (name plus the three most fundamental
+    fields from the plan template) rather than favouring any vertical's
+    column names.
+    """
+    if not plan.columns:
+        columns = ["name"]
+    else:
+        # `name` is always first in the schema; keep up to 4 columns total.
+        columns = list(plan.columns[:4])
+        if "name" not in columns:
+            columns = ["name"] + [c for c in columns if c != "name"]
 
     return PlannerOutput(
         query_family=plan.query_family,
         entity_type=plan.entity_type,
-        columns=preferred,
+        columns=columns,
         search_angles=list(plan.search_angles),
         facets=list(plan.facets),
     )
@@ -230,6 +233,7 @@ async def _extract_from_chunk(
                 timeout=settings.extract_llm_timeout_seconds,
                 attempts=settings.extract_llm_max_attempts,
                 provider=provider,
+                usage_stats=stats,
             )
             if idx > 0:
                 _bump_stat(stats, "provider_fallback_successes")
@@ -353,6 +357,44 @@ def _merge_within_page(all_drafts: list[EntityDraft]) -> list[EntityDraft]:
     return merged
 
 
+def _non_name_cells(draft: EntityDraft) -> int:
+    return sum(1 for col in draft.cells if col != "name")
+
+
+def _deterministic_result_is_sufficient(
+    page: ScrapedPage,
+    plan: PlannerOutput,
+    mode: str,
+    drafts: list[EntityDraft],
+) -> bool:
+    if not drafts:
+        return False
+
+    regime = page.evidence_regime
+    best_non_name = max((_non_name_cells(draft) for draft in drafts), default=0)
+    target_non_name = max(1, len([col for col in plan.columns if col != "name"]))
+    coverage = best_non_name / target_non_name
+
+    if mode == "discovery":
+        if regime in {"directory_listing", "local_business_listing"} and len(drafts) >= 2:
+            return True
+        return best_non_name >= 2
+
+    if regime == "software_repo_or_docs":
+        return coverage >= 0.4 or any(
+            {"website_or_repo", "license", "maintainer_or_org"} & set(draft.cells)
+            for draft in drafts
+        )
+
+    if regime in {"official_site", "local_business_listing"}:
+        return coverage >= 0.4 or any(
+            {"website", "url", "homepage", "location", "phone", "contact_or_booking"} & set(draft.cells)
+            for draft in drafts
+        )
+
+    return coverage >= 0.5
+
+
 # ── Public API ─────────────────────────────────────────────────────────────────
 
 async def extract_from_page(
@@ -364,16 +406,47 @@ async def extract_from_page(
     stats: dict[str, int] | None = None,
 ) -> list[EntityDraft]:
     """Extract entities from a single scraped page."""
+    _bump_stat(stats, f"regime_{page.evidence_regime}_extraction_pages")
     settings = get_settings()
+    _bump_stat(stats, "pages_seen")
+    deterministic_drafts = extract_deterministic_entities(query, plan, page, mode=mode)
+    if deterministic_drafts:
+        _bump_stat(stats, "deterministic_pages_with_entities")
+        _bump_stat(stats, "deterministic_entities", len(deterministic_drafts))
+        log.info(
+            "Deterministic extractor found %d entities for %s (regime=%s, mode=%s)",
+            len(deterministic_drafts),
+            page.url,
+            page.evidence_regime,
+            mode,
+        )
+        if _deterministic_result_is_sufficient(page, plan, mode, deterministic_drafts):
+            merged = _merge_within_page(deterministic_drafts)
+            _bump_stat(stats, "pages_routed_deterministic")
+            _bump_stat(stats, "entities_extracted", len(merged))
+            if merged:
+                _bump_stat(stats, "pages_with_entities")
+            return merged
+
     chunks = chunk_text(
         page.cleaned_text,
         max_tokens=settings.chunk_token_limit,
         max_chunks=settings.max_chunks_per_page,
     )
-    _bump_stat(stats, "pages_seen")
     _bump_stat(stats, "chunks_seen", len(chunks))
 
-    log.info("Extracting from %s (%d chunk(s), mode=%s)", page.url, len(chunks), mode)
+    if deterministic_drafts:
+        _bump_stat(stats, "pages_routed_hybrid")
+    else:
+        _bump_stat(stats, "pages_routed_llm")
+
+    log.info(
+        "Extracting from %s (%d chunk(s), regime=%s, mode=%s)",
+        page.url,
+        len(chunks),
+        page.evidence_regime,
+        mode,
+    )
 
     async def _run_chunk(chunk: str) -> list[EntityDraft]:
         if llm_sem is None:
@@ -388,7 +461,7 @@ async def extract_from_page(
         results = await asyncio.gather(*tasks)
         drafts = [d for batch in results for d in batch]
 
-    merged = _merge_within_page(drafts)
+    merged = _merge_within_page(deterministic_drafts + drafts)
     _bump_stat(stats, "entities_extracted", len(merged))
     if merged:
         _bump_stat(stats, "pages_with_entities")

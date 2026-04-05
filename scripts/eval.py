@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import re
 import statistics
 import sys
 import time
@@ -57,6 +58,130 @@ _ACTIONABLE_COLS = {
     "website", "homepage", "url", "phone", "phone_number", "email",
     "address", "location", "rating", "price", "price_range", "funding",
 }
+
+
+def _normalize_label(text: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^\w\s]", " ", (text or "").lower())).strip()
+
+
+def _label_tokens(text: str) -> set[str]:
+    return {token for token in re.findall(r"[a-z0-9]+", _normalize_label(text)) if len(token) > 1}
+
+
+def _names_match(actual: str, candidate: str) -> bool:
+    left = _normalize_label(actual)
+    right = _normalize_label(candidate)
+    if not left or not right:
+        return False
+    if left == right or left in right or right in left:
+        return True
+    left_tokens = _label_tokens(left)
+    right_tokens = _label_tokens(right)
+    if not left_tokens or not right_tokens:
+        return False
+    overlap = len(left_tokens & right_tokens)
+    return overlap >= min(len(left_tokens), len(right_tokens))
+
+
+def _iter_expected_names(entity_spec: dict[str, Any]) -> list[str]:
+    names = [entity_spec.get("name", "")]
+    aliases = entity_spec.get("aliases") or []
+    names.extend(alias for alias in aliases if isinstance(alias, str))
+    return [name for name in names if name]
+
+
+def _expected_field_map(entity_spec: dict[str, Any]) -> dict[str, list[str]]:
+    key_fields = entity_spec.get("key_fields") or {}
+    if isinstance(key_fields, list):
+        return {str(col): [] for col in key_fields}
+    if isinstance(key_fields, dict):
+        field_map: dict[str, list[str]] = {}
+        for col, expected in key_fields.items():
+            if expected in (None, ""):
+                field_map[str(col)] = []
+            elif isinstance(expected, list):
+                field_map[str(col)] = [str(item) for item in expected if item]
+            else:
+                field_map[str(col)] = [str(expected)]
+        return field_map
+    return {}
+
+
+def _compute_labeled_metrics(result: dict, query_spec: dict[str, Any] | None) -> dict[str, Any]:
+    expected_entities = (query_spec or {}).get("expected_entities") or []
+    if not expected_entities or result.get("status") != "done" or not result.get("result"):
+        return {
+            "has_labels": bool(expected_entities),
+            "labeled_expected_entities": len(expected_entities),
+            "labeled_matched_entities": 0,
+            "entity_precision": 0.0,
+            "entity_recall": 0.0,
+            "field_accuracy": 0.0,
+            "citation_presence_rate": 0.0,
+        }
+
+    rows = result["result"].get("rows", [])
+    named_rows = []
+    for row in rows:
+        name_cell = (row.get("cells") or {}).get("name") or {}
+        name = name_cell.get("value", "")
+        if name:
+            named_rows.append(row)
+
+    matched_row_indexes: set[int] = set()
+    matched_entities = 0
+    total_field_checks = 0
+    total_field_hits = 0
+    total_field_cited = 0
+
+    for entity_spec in expected_entities:
+        candidate_names = _iter_expected_names(entity_spec)
+        matched_row = None
+        matched_index = None
+        for idx, row in enumerate(named_rows):
+            if idx in matched_row_indexes:
+                continue
+            row_name = ((row.get("cells") or {}).get("name") or {}).get("value", "")
+            if any(_names_match(row_name, candidate) for candidate in candidate_names):
+                matched_row = row
+                matched_index = idx
+                break
+
+        if matched_row is None:
+            total_field_checks += len(_expected_field_map(entity_spec))
+            continue
+
+        matched_entities += 1
+        if matched_index is not None:
+            matched_row_indexes.add(matched_index)
+
+        field_map = _expected_field_map(entity_spec)
+        total_field_checks += len(field_map)
+        cells = matched_row.get("cells") or {}
+        for col, acceptable_values in field_map.items():
+            actual_cell = cells.get(col)
+            if not isinstance(actual_cell, dict):
+                continue
+            actual_value = str(actual_cell.get("value", "")).strip()
+            if not actual_value:
+                continue
+            if acceptable_values:
+                if not any(_names_match(actual_value, acceptable) for acceptable in acceptable_values):
+                    continue
+            total_field_hits += 1
+            if actual_cell.get("source_url") and actual_cell.get("evidence_snippet"):
+                total_field_cited += 1
+
+    returned_named = max(len(named_rows), 1)
+    return {
+        "has_labels": True,
+        "labeled_expected_entities": len(expected_entities),
+        "labeled_matched_entities": matched_entities,
+        "entity_precision": round(matched_entities / returned_named, 3),
+        "entity_recall": round(matched_entities / max(len(expected_entities), 1), 3),
+        "field_accuracy": round(total_field_hits / max(total_field_checks, 1), 3),
+        "citation_presence_rate": round(total_field_cited / max(total_field_hits, 1), 3) if total_field_hits else 0.0,
+    }
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -90,10 +215,10 @@ def _submit_and_poll(client: httpx.Client, base_url: str, query: str) -> dict:
     return {"status": "timeout", "error": f"Timed out after {_POLL_TIMEOUT}s"}
 
 
-def _compute_metrics(result: dict) -> dict[str, Any]:
+def _compute_metrics(result: dict, query_spec: dict[str, Any] | None = None) -> dict[str, Any]:
     """Compute evaluation metrics from a completed search result."""
     if result.get("status") != "done" or not result.get("result"):
-        return {
+        metrics = {
             "status": result.get("status", "unknown"),
             "error": result.get("error", ""),
             "rows_returned": 0,
@@ -108,6 +233,8 @@ def _compute_metrics(result: dict) -> dict[str, Any]:
             "avg_source_diversity": 0.0,
             "duration_seconds": 0.0,
         }
+        metrics.update(_compute_labeled_metrics(result, query_spec))
+        return metrics
 
     sr = result["result"]
     rows = sr.get("rows", [])
@@ -167,7 +294,7 @@ def _compute_metrics(result: dict) -> dict[str, Any]:
         else:
             diversities.append(0.0)
 
-    return {
+    metrics = {
         "status": "done",
         "error": "",
         "rows_returned": num_rows,
@@ -205,6 +332,8 @@ def _compute_metrics(result: dict) -> dict[str, Any]:
         "normalized_query": meta.get("normalized_query", ""),
         "pipeline_counts": meta.get("pipeline_counts", {}),
     }
+    metrics.update(_compute_labeled_metrics(result, query_spec))
+    return metrics
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -214,6 +343,7 @@ def main() -> None:
     parser.add_argument("--base-url", default=_DEFAULT_BASE_URL, help="Server base URL")
     parser.add_argument("--queries", default=str(_DEFAULT_QUERIES), help="Path to eval queries JSON")
     parser.add_argument("--category", default=None, help="Filter queries by category")
+    parser.add_argument("--labels-only", action="store_true", help="Run only queries with expected_entities labels")
     parser.add_argument("--tag", default="full", help="Tag for this eval run (e.g. no-rerank)")
     args = parser.parse_args()
 
@@ -226,6 +356,8 @@ def main() -> None:
 
     if args.category:
         queries = [q for q in queries if q.get("category") == args.category]
+    if args.labels_only:
+        queries = [q for q in queries if q.get("expected_entities")]
 
     if not queries:
         sys.exit("No queries to evaluate after filtering.")
@@ -250,14 +382,14 @@ def main() -> None:
             raw_result = {"status": "error", "error": str(exc)}
 
         elapsed = round(time.monotonic() - t0, 1)
-        metrics = _compute_metrics(raw_result)
+        metrics = _compute_metrics(raw_result, q)
         metrics["query_id"] = qid
         metrics["query"] = query_text
         metrics["category"] = q.get("category", "")
         metrics["wall_time"] = elapsed
 
         status_icon = "OK" if metrics["status"] == "done" else "FAIL"
-        print(
+        line = (
             f"  {status_icon}  rows={metrics['rows_returned']}  "
             f"fill={metrics['fill_rate']:.0%}  "
             f"actionable={metrics['actionable_rate']:.0%}  "
@@ -267,6 +399,13 @@ def main() -> None:
             f"diversity={metrics['avg_source_diversity']:.2f}  "
             f"time={elapsed}s"
         )
+        if metrics.get("has_labels"):
+            line += (
+                f"  precision={metrics['entity_precision']:.0%}"
+                f"  recall={metrics['entity_recall']:.0%}"
+                f"  field_acc={metrics['field_accuracy']:.0%}"
+            )
+        print(line)
         results.append(metrics)
 
     client.close()
@@ -290,6 +429,17 @@ def main() -> None:
             "avg_duration": round(statistics.mean(r["duration_seconds"] for r in done), 1),
             "median_duration": round(statistics.median(r["duration_seconds"] for r in done), 1),
         }
+        labeled_done = [r for r in done if r.get("has_labels")]
+        if labeled_done:
+            agg.update(
+                {
+                    "labeled_queries": len(labeled_done),
+                    "avg_entity_precision": round(statistics.mean(r["entity_precision"] for r in labeled_done), 3),
+                    "avg_entity_recall": round(statistics.mean(r["entity_recall"] for r in labeled_done), 3),
+                    "avg_field_accuracy": round(statistics.mean(r["field_accuracy"] for r in labeled_done), 3),
+                    "avg_citation_presence_rate": round(statistics.mean(r["citation_presence_rate"] for r in labeled_done), 3),
+                }
+            )
 
     print("\n" + "=" * 72)
     print("AGGREGATE SUMMARY")
@@ -314,6 +464,7 @@ def main() -> None:
             "official_site_rate",
             "multi_source_rate", "avg_aggregate_confidence",
             "avg_source_diversity", "duration_seconds", "wall_time",
+            "entity_precision", "entity_recall", "field_accuracy", "citation_presence_rate",
             "pages_scraped", "pages_after_rerank", "rerank_scorer",
             "entities_extracted", "entities_after_merge", "gap_fill_used",
             "query_family", "normalized_query",

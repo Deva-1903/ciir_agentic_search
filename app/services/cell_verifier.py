@@ -32,13 +32,20 @@ from app.utils.text import normalize_name
 log = get_logger(__name__)
 
 # Columns we never try to re-verify — the name cell defines the target entity,
-# weak-signal fields are short and rarely contain the entity name.
-_SKIP_COLS = {"name", "cuisine_type", "category", "type", "description", "overview", "summary"}
+# and weak-signal descriptive fields are too short/generic to reliably contain
+# the entity name. Selected by field semantics, not by vertical.
+_SKIP_COLS = {
+    "name", "category", "type", "description", "overview", "summary",
+    "tagline", "tags", "notes", "industry",
+}
 
 # Columns that typically hold the entity's own URL (used as an "official source"
 # signal). If a cell's source_url shares domain with one of these, we consider
 # the cell aligned by provenance.
-_WEBSITE_COLS = {"website", "url", "official_website", "homepage", "link"}
+_WEBSITE_COLS = {
+    "website", "url", "official_website", "homepage", "link",
+    "website_or_repo", "website_or_profile", "site",
+}
 
 # Fuzzy threshold on normalized entity-name tokens appearing in evidence / title.
 _ALIGN_FUZZ_THRESHOLD = 80

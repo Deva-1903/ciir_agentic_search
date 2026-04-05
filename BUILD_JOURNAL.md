@@ -1117,7 +1117,7 @@ What was built or changed:
   What was deferred: No startup-time provider health check was added, and Groq-specific error classification still lives only in logs rather than a dedicated structured error channel. The planner's generic fallback behavior also remains as a separate resilience tradeoff.
   Resulting improvement: Broad but valid discovery queries no longer collapse to zero rows just because the primary extractor provider is quota-limited. The pipeline now degrades into a slower secondary-provider extraction path instead of an empty-result path.
   Tradeoffs introduced: Extraction can take noticeably longer and consume secondary-provider budget when Groq is rate-limited. `pipeline_counts` slightly increases response metadata size, but it is compact and useful for debugging.
-  Files/modules affected: `app/services/extractor.py`, `app/api/routes_search.py`, `app/models/schema.py`, `scripts/smoke_test.py`, `tests/test_extractor.py`, `docs/BUILD_JOURNAL.md`.
+  Files/modules affected: `app/services/extractor.py`, `app/api/routes_search.py`, `app/models/schema.py`, `scripts/smoke_test.py`, `tests/test_extractor.py`, `BUILD_JOURNAL.md`.
   Next step: Add a bounded provider-health or quota-awareness check so the pipeline can choose the fallback provider earlier, reducing the long extraction stall before fallback succeeds.
 
 ---
@@ -1156,7 +1156,7 @@ What was fixed immediately: Broad-query recall is now protected by normalization
 What was deferred: Official-site resolution could be broadened further, startup-time provider health checks are still absent, and there is still no labeled precision/recall benchmark.
 Resulting improvement: The pipeline is now easier to reason about and materially more stable on broad discovery queries. Good rows survive long enough to be ranked and enriched instead of being filtered out before the system has assembled enough evidence.
 Tradeoffs introduced: More candidates survive longer, which increases downstream work and can raise latency/cost. Official-site resolution is heuristic rather than guaranteed. The planner is intentionally less free-form, so exotic queries may route through `fallback_generic` more often than before.
-Files/modules affected: `app/models/schema.py`, `app/core/config.py`, `app/api/routes_search.py`, `app/services/query_normalizer.py`, `app/services/planner.py`, `app/services/extractor.py`, `app/services/official_site.py`, `app/services/gap_fill.py`, `app/services/ranker.py`, `app/services/verifier.py`, `scripts/eval.py`, `static/app.js`, `templates/index.html`, `README.md`, `docs/BUILD_JOURNAL.md`, `tests/test_planner.py`, `tests/test_query_normalizer.py`, `tests/test_official_site.py`, `tests/test_extractor.py`, `tests/test_provider_routing.py`, `tests/test_eval_metrics.py`.
+Files/modules affected: `app/models/schema.py`, `app/core/config.py`, `app/api/routes_search.py`, `app/services/query_normalizer.py`, `app/services/planner.py`, `app/services/extractor.py`, `app/services/official_site.py`, `app/services/gap_fill.py`, `app/services/ranker.py`, `app/services/verifier.py`, `scripts/eval.py`, `static/app.js`, `templates/index.html`, `README.md`, `BUILD_JOURNAL.md`, `tests/test_planner.py`, `tests/test_query_normalizer.py`, `tests/test_official_site.py`, `tests/test_extractor.py`, `tests/test_provider_routing.py`, `tests/test_eval_metrics.py`.
 Next step: Improve canonical-domain recall and add a small benchmark of labeled cells or rows so late-filtering changes can be judged on precision as well as recall.
 
 ---
@@ -1191,7 +1191,7 @@ What was fixed immediately: Reviewer runs now default to OpenAI extraction inste
 What was deferred: No startup-time provider health check was added, and there is still no broader canonical-domain enrichment pass beyond the existing heuristic resolver. The pseudo-entity rules remain deliberately targeted rather than becoming a large classifier.
 Resulting improvement: The demo runtime path is more stable, final rows are more trustworthy, and the `website` column now matches normal reviewer expectations. These changes improve semantic correctness and reduce the kinds of artifacts that make a near-finished project look unreliable.
 Tradeoffs introduced: OpenAI-first extraction is generally slower and can cost more than an ideal healthy Groq run. Website cells may be empty more often because the system now refuses semantically wrong URLs. The pseudo-entity rule is intentionally conservative, so some borderline category-like labels may still be downranked rather than always deleted.
-Files/modules affected: `app/core/config.py`, `.env`, `.env.example`, `app/services/llm.py`, `app/services/extractor.py`, `app/services/field_validator.py`, `app/services/source_quality.py`, `app/services/official_site.py`, `app/services/verifier.py`, `README.md`, `docs/BUILD_JOURNAL.md`, `tests/test_provider_routing.py`, `tests/test_extractor.py`, `tests/test_field_validator.py`, `tests/test_official_site.py`, `tests/test_verifier.py`.
+Files/modules affected: `app/core/config.py`, `.env`, `.env.example`, `app/services/llm.py`, `app/services/extractor.py`, `app/services/field_validator.py`, `app/services/source_quality.py`, `app/services/official_site.py`, `app/services/verifier.py`, `README.md`, `BUILD_JOURNAL.md`, `tests/test_provider_routing.py`, `tests/test_extractor.py`, `tests/test_field_validator.py`, `tests/test_official_site.py`, `tests/test_verifier.py`.
 Next step: Improve canonical-domain recall without weakening the stricter homepage semantics, and consider lightweight startup/provider health telemetry so the demo can surface degraded secondary-provider behavior more explicitly.
 
 ---
@@ -1698,3 +1698,188 @@ POST /api/search
 14. **Official-site heuristics are conservative:** Canonical-domain resolution only fires when the page/domain signals look strong. This avoids attaching the wrong website, but it also means many valid rows still rely on editorial/directory evidence instead of an explicit official-site match.
 
 15. **Homepage semantics prefer blank over wrong:** The stricter `website` rules now reject article/blog/directory URLs as final websites. This improves trust, but it also means some real entities will show no website until a cleaner canonical homepage can be resolved.
+
+---
+
+## Iteration 23 - Evidence-regime adaptation and deterministic-first extraction
+
+Date: 2026-04-05
+
+### Diagnosis memo added
+
+- Added `docs/DIAGNOSIS_MEMO.md` to capture the current architecture, top five weaknesses, and the chosen implementation plan before further edits.
+- Main diagnosis: the pipeline structure was already solid, but page understanding still collapsed too early to `url + title + cleaned_text`, so routing, extraction, ranking, and evaluation could not adapt to different evidence regimes.
+
+### Code changes
+
+- `app/models/schema.py`
+  - Extended `ScrapedPage` with `raw_html`, `page_metadata`, `evidence_regime`, `regime_confidence`, and `fetch_method`.
+  - Extended `SearchMetadata` with `pipeline_timings_ms`.
+
+- `app/services/evidence_regimes.py` (new)
+  - Added page/source regime classifier supporting:
+    - `official_site`
+    - `directory_listing`
+    - `editorial_article`
+    - `local_business_listing`
+    - `software_repo_or_docs`
+    - `marketplace_aggregator`
+    - `unknown`
+  - Added lightweight JS-heavy/app-shell detector for selective rendering fallback.
+
+- `app/models/db.py`
+  - Migrated the scrape cache schema to store `raw_html`, `page_metadata_json`, and `fetch_method`.
+  - Added backward-compatible column backfill via `PRAGMA table_info(...)` + `ALTER TABLE`.
+
+- `app/services/scraper.py`
+  - Scraper now extracts lightweight HTML metadata (headings, meta description, JSON-LD types/items, tel/mailto links, script count).
+  - Every page is classified into an evidence regime before downstream routing.
+  - Added optional, budgeted JS-render fallback behind config:
+    - `JS_RENDERING_ENABLED`
+    - `JS_RENDER_MAX_PAGES`
+    - `JS_RENDER_TIMEOUT`
+  - Added scrape-stage stats for cache hits, regime counts, and JS rendering usage.
+
+- `app/services/deterministic_extractors.py` (new)
+  - Added deterministic/semi-deterministic parsers for:
+    - repo/docs pages
+    - official pages
+    - local-business pages with structured data
+    - directory/listing pages with anchor heuristics
+
+- `app/services/extractor.py`
+  - Extraction is now deterministic-first.
+  - For each page:
+    - run regime-specific parser first
+    - skip the LLM entirely when deterministic output is strong enough
+    - otherwise merge deterministic and LLM outputs page-locally
+  - Added routing stats:
+    - `pages_routed_deterministic`
+    - `pages_routed_hybrid`
+    - `pages_routed_llm`
+    - `deterministic_entities`
+
+- `app/services/source_quality.py`
+  - Reworked source scoring to use evidence regimes as the primary signal.
+  - Broadened curated editorial coverage to include research/academic-ish domains.
+  - Added `row_evidence_regime_profile(row)` for downstream ranking.
+
+- `app/services/ranker.py`
+  - Replaced the old 6-feature score with a still-explainable weighted sum that adds:
+    - field-importance weighting by query family
+    - local/geographic fit
+    - freshness when relevant
+    - reputation signals when available
+    - official-source preference
+    - structured-source preference
+  - Kept pruning logic conservative and reviewer-friendly.
+
+- `app/services/gap_fill.py`
+  - Gap-fill page selection is now regime-aware.
+  - Marketplace pages are skipped for fill.
+  - Software queries now prefer repo/docs pages; place queries prefer official/local-business pages; organization queries prefer official/editorial pages.
+
+- `app/services/official_site.py`
+  - Official-site resolution now uses page evidence regimes so local-business official pages are not rejected just because they look structured/listing-like.
+
+- `app/services/verifier.py`
+  - Generalized family-specific pseudo-entity terms from old vertical names to the new structural families.
+  - Removed the stale `cuisine_type` reference from actionable-field counting.
+
+- `app/services/llm.py`
+  - Added optional LLM usage accounting:
+    - `llm_calls`
+    - `llm_prompt_tokens`
+    - `llm_completion_tokens`
+    - `llm_total_tokens`
+
+- `app/services/planner.py`
+  - Planner now accepts an optional stats dict so planner-token usage is included in pipeline metadata.
+
+- `app/api/routes_search.py`
+  - Threaded planner, scrape, extraction, gap-fill, and timing stats into response metadata.
+  - Added:
+    - `llm_calls_total`
+    - `llm_tokens_total`
+    - deterministic routing counters
+    - scrape/cache/JS counters
+    - stage timings in milliseconds
+
+### Tests added/updated
+
+- Added `tests/test_evidence_regimes.py`.
+- Added deterministic-first integration coverage in `tests/test_extractor.py`.
+- Added location-aware ranking coverage in `tests/test_ranker.py`.
+- Extended `tests/test_eval_metrics.py` with labeled-eval metrics.
+
+### Validation
+
+- Targeted tests passed after the implementation:
+  - evidence regimes
+  - extractor
+  - ranker
+  - source quality
+  - verifier
+  - eval metrics
+
+### Tradeoffs introduced
+
+- Raw HTML is now cached, which increases SQLite size but unlocks deterministic parsing and cached regime reuse.
+- JS fallback is intentionally tiny-budget and optional. This improves recall on app-shell pages without turning every scrape into browser automation.
+- Source-quality and ranking are broader than before, but still heuristic and intentionally transparent rather than learned.
+
+---
+
+## Iteration 24 - Evaluation refresh and docs/UI alignment
+
+Date: 2026-04-05
+
+### Evaluation harness
+
+- `scripts/eval.py`
+  - Added labeled query support with:
+    - expected entities
+    - aliases
+    - key-field checks
+    - entity precision-ish
+    - entity recall-ish
+    - field accuracy
+    - citation presence rate
+  - Added `--labels-only` for focused labeled runs.
+
+- `docs/eval_queries.json`
+  - Replaced the old food/tech/travel-heavy query mix with a broader default set spanning:
+    - places
+    - software
+    - organizations
+    - people
+    - products
+
+- `docs/eval_labeled_queries.json` (new)
+  - Added a small labeled regression set covering:
+    - place/venue
+    - software/repo/docs
+    - company/organization
+
+### Docs/UI
+
+- `README.md`
+  - Updated the architecture summary to mention:
+    - evidence regimes
+    - deterministic parsing
+    - selective JS fallback
+    - labeled evaluation
+  - Updated example queries and environment variables.
+  - Replaced stale references to old query families (`startup_company`, `fallback_generic`, etc.).
+
+- `static/app.js`
+  - Refreshed frontend source-domain mirrors to broader general-purpose sets.
+  - Updated quality-controls text to mention evidence-regime-aware scoring.
+  - Updated run-stats panel to surface deterministic/hybrid/LLM routing and JS-render counts.
+  - Replaced stale `fallback_generic` label with `generic_entity_list`.
+
+### Remaining weak spots after Iterations 23-24
+
+- Deterministic extraction is intentionally conservative. Many pages will still fall through to the LLM.
+- Labeled evaluation is still small and hand-curated; it is useful for regression checks, not for broad claims.
+- The frontend still shows simplified source-type badges rather than full evidence-regime badges.

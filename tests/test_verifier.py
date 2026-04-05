@@ -128,7 +128,7 @@ def test_verify_rows_filters_pseudo_entity_category_label_when_real_option_exist
     )
 
     startup_plan = PlannerOutput(
-        query_family="startup_company",
+        query_family="organization_company",
         entity_type="startup",
         columns=["name", "website", "headquarters", "focus_area", "product_or_service", "funding_stage"],
         search_angles=["AI startups in healthcare"],

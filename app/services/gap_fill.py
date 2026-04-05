@@ -29,25 +29,97 @@ from app.utils.dedupe import names_are_similar
 log = get_logger(__name__)
 
 _COLUMN_QUERY_HINTS = {
-    "address": "address",
-    "phone": "phone number",
-    "phone_number": "phone number",
+    # Website / canonical URL columns.
     "website": "official website",
     "url": "official website",
     "homepage": "official website",
-    "rating": "reviews rating",
-    "price": "price range",
-    "price_range": "price range",
+    "site": "official website",
+    "website_or_repo": "official website repository",
+    "website_or_profile": "official website profile",
+    # Contact / geographic columns.
+    "address": "address",
     "location": "location",
     "headquarters": "headquarters",
-    "founded": "founded",
-    "year_founded": "year founded",
-    "founders": "founders",
-    "funding_stage": "funding stage",
-    "funding_round": "funding round",
-    "funding_amount": "funding amount",
-    "amount_raised": "amount raised",
-    "investors": "investors",
+    "phone": "phone number",
+    "phone_number": "phone number",
+    "telephone": "phone number",
+    "contact_or_booking": "contact booking",
+    # Structural attribute columns (reusable across verticals).
+    "category": "category",
+    "offering": "offering services",
+    "focus_area": "focus area",
+    "product_or_service": "product service",
+    "stage_or_status": "status stage",
+    "primary_use_case": "use case",
+    "license": "license",
+    "language_or_stack": "language stack technology",
+    "maintainer_or_org": "maintainer organization",
+    "key_feature": "features",
+    "price_or_availability": "price availability",
+    "maker_or_brand": "brand manufacturer",
+    "affiliation": "affiliation",
+    "role_or_title": "role title",
+    "notable_work": "notable work",
+    # Rating / review columns.
+    "rating": "reviews rating",
+    "score": "score",
+}
+
+_GAP_FILL_REGIME_PRIORITY = {
+    "organization_company": {
+        "official_site": 4,
+        "editorial_article": 3,
+        "directory_listing": 2,
+        "unknown": 1,
+        "software_repo_or_docs": 1,
+        "local_business_listing": 0,
+        "marketplace_aggregator": -2,
+    },
+    "place_venue": {
+        "official_site": 4,
+        "local_business_listing": 4,
+        "directory_listing": 2,
+        "editorial_article": 1,
+        "unknown": 1,
+        "software_repo_or_docs": 0,
+        "marketplace_aggregator": -2,
+    },
+    "software_project": {
+        "software_repo_or_docs": 5,
+        "official_site": 3,
+        "editorial_article": 2,
+        "directory_listing": 1,
+        "unknown": 1,
+        "local_business_listing": 0,
+        "marketplace_aggregator": -2,
+    },
+    "product_offering": {
+        "official_site": 4,
+        "editorial_article": 2,
+        "directory_listing": 2,
+        "unknown": 1,
+        "software_repo_or_docs": 1,
+        "local_business_listing": 1,
+        "marketplace_aggregator": -1,
+    },
+    "person_group": {
+        "official_site": 3,
+        "editorial_article": 3,
+        "directory_listing": 1,
+        "unknown": 1,
+        "software_repo_or_docs": 0,
+        "local_business_listing": 0,
+        "marketplace_aggregator": -2,
+    },
+    "generic_entity_list": {
+        "official_site": 2,
+        "editorial_article": 2,
+        "directory_listing": 2,
+        "software_repo_or_docs": 2,
+        "local_business_listing": 2,
+        "unknown": 1,
+        "marketplace_aggregator": -2,
+    },
 }
 
 
@@ -101,10 +173,40 @@ def _official_urls_for_row(row: EntityRow) -> list[str]:
     return urls[:2]
 
 
+def _page_fill_priority(page, plan: PlannerOutput) -> tuple[int, float]:
+    weights = _GAP_FILL_REGIME_PRIORITY.get(plan.query_family, _GAP_FILL_REGIME_PRIORITY["generic_entity_list"])
+    return (
+        weights.get(getattr(page, "evidence_regime", "unknown"), 0),
+        float(getattr(page, "regime_confidence", 0.0)),
+    )
+
+
+async def _scrape_urls_maybe_with_stats(urls: list[str], stats: dict[str, int] | None):
+    try:
+        return await scrape_urls(urls, stats=stats)
+    except TypeError:
+        return await scrape_urls(urls)
+
+
+async def _scrape_pages_maybe_with_stats(results, stats: dict[str, int] | None):
+    try:
+        return await scrape_pages(results, stats=stats)
+    except TypeError:
+        return await scrape_pages(results)
+
+
+async def _extract_page_maybe_with_stats(query: str, plan: PlannerOutput, page, stats: dict[str, int] | None):
+    try:
+        return await extract_from_page(query, plan, page, stats=stats)
+    except TypeError:
+        return await extract_from_page(query, plan, page)
+
+
 async def run_gap_fill(
     rows: list[EntityRow],
     plan: PlannerOutput,
     query: str,
+    stats: dict[str, int] | None = None,
 ) -> tuple[list[EntityRow], bool]:
     """
     Attempt to fill sparse cells in top N rows.
@@ -146,12 +248,12 @@ async def run_gap_fill(
         pages = []
         official_urls = _official_urls_for_row(row)
         if official_urls:
-            pages.extend(await scrape_urls(official_urls))
+            pages.extend(await _scrape_urls_maybe_with_stats(official_urls, stats))
 
         # Only scrape a small number of additional search-result pages
         limited = brave_results[: settings.gap_fill_max_urls_per_entity]
         if limited:
-            pages.extend(await scrape_pages(limited))
+            pages.extend(await _scrape_pages_maybe_with_stats(limited, stats))
 
         # Preserve order while deduplicating URLs.
         deduped_pages: list = []
@@ -163,8 +265,12 @@ async def run_gap_fill(
             deduped_pages.append(page)
         pages = deduped_pages
 
+        pages.sort(key=lambda page: _page_fill_priority(page, plan), reverse=True)
+
         for page in pages:
-            drafts = await extract_from_page(focused_query, gap_plan, page)
+            if getattr(page, "evidence_regime", "unknown") == "marketplace_aggregator":
+                continue
+            drafts = await _extract_page_maybe_with_stats(focused_query, gap_plan, page, stats)
             for draft in drafts:
                 if not names_are_similar(draft.entity_name, entity_name_str):
                     continue

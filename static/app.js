@@ -90,40 +90,54 @@ function confLabel(conf) {
 
 // ── Source type classification (simplified frontend mirror of source_quality.py) ─
 const _EDITORIAL = new Set([
-  "eater.com",
-  "foodandwine.com",
-  "grubstreet.com",
-  "michelin.com",
+  "wired.com",
+  "techcrunch.com",
+  "arstechnica.com",
+  "acm.org",
+  "arxiv.org",
+  "bbc.com",
+  "bloomberg.com",
+  "cnet.com",
+  "economist.com",
+  "forbes.com",
+  "ft.com",
+  "ieee.org",
+  "nature.com",
   "newyorker.com",
   "nytimes.com",
-  "seriouseats.com",
-  "tastingtable.com",
-  "theinfatuation.com",
-  "thrillist.com",
-  "timeout.com",
-  "vogue.com",
-  "techcrunch.com",
-  "wired.com",
-  "arstechnica.com",
+  "reuters.com",
+  "sciencemag.org",
+  "springer.com",
+  "theatlantic.com",
+  "theguardian.com",
   "theverge.com",
+  "vox.com",
   "zdnet.com",
-  "cnet.com",
 ]);
 const _DIRECTORY = new Set([
-  "yelp.com",
-  "tripadvisor.com",
-  "opentable.com",
-  "g2.com",
+  "booking.com",
   "capterra.com",
+  "crunchbase.com",
+  "g2.com",
+  "glassdoor.com",
+  "opentable.com",
+  "producthunt.com",
+  "tripadvisor.com",
   "trustpilot.com",
+  "yelp.com",
 ]);
 const _MARKETPLACE = new Set([
-  "doordash.com",
-  "grubhub.com",
-  "postmates.com",
-  "seamless.com",
-  "ubereats.com",
+  "airbnb.com",
   "amazon.com",
+  "doordash.com",
+  "ebay.com",
+  "etsy.com",
+  "expedia.com",
+  "grubhub.com",
+  "hotels.com",
+  "kayak.com",
+  "postmates.com",
+  "ubereats.com",
 ]);
 
 function extractDomain(url) {
@@ -446,6 +460,12 @@ function renderQualityControls(m) {
     icon: "🔎",
     text: "Candidate discovery runs before attribute filling to preserve recall",
   });
+  if ((m.pipeline_counts?.pages_routed_deterministic || 0) > 0) {
+    items.push({
+      icon: "⚙",
+      text: `Deterministic parsing handled ${m.pipeline_counts.pages_routed_deterministic} page(s) before LLM fallback`,
+    });
+  }
   if (m.entities_extracted && m.entities_after_merge) {
     const deduped = m.entities_extracted - m.entities_after_merge;
     if (deduped > 0) {
@@ -469,7 +489,7 @@ function renderQualityControls(m) {
   });
   items.push({
     icon: "✓",
-    text: "Source-quality scoring (official / editorial / directory / marketplace)",
+    text: "Evidence-regime-aware source scoring (official / editorial / directory / marketplace)",
   });
   items.push({
     icon: "✓",
@@ -477,6 +497,12 @@ function renderQualityControls(m) {
   });
   if (m.gap_fill_used) {
     items.push({ icon: "↻", text: "Gap-fill enrichment run on sparse rows" });
+  }
+  if ((m.pipeline_counts?.pages_rendered_with_js || 0) > 0) {
+    items.push({
+      icon: "↯",
+      text: `Selective JS fallback rendered ${m.pipeline_counts.pages_rendered_with_js} page(s)`,
+    });
   }
   items.push({
     icon: "✓",
@@ -496,7 +522,7 @@ function renderRunStats(m) {
   const rows = [
     ["Total duration", `${m.duration_seconds}s`],
     ["Execution mode", "Async background job (non-blocking)"],
-    ["Query family", m.query_family || "fallback_generic"],
+    ["Query family", m.query_family || "generic_entity_list"],
     ["URLs considered", m.urls_considered],
     ["Pages scraped", m.pages_scraped],
     ["Pages sent to extraction", m.pages_after_rerank || m.pages_scraped],
@@ -504,6 +530,10 @@ function renderRunStats(m) {
     ["Entities after merge", m.entities_after_merge],
     ["Candidate rows", m.pipeline_counts?.candidate_rows ?? m.entities_after_merge],
     ["Official sites resolved", m.pipeline_counts?.official_sites_resolved ?? 0],
+    ["Deterministic pages", m.pipeline_counts?.pages_routed_deterministic ?? 0],
+    ["Hybrid pages", m.pipeline_counts?.pages_routed_hybrid ?? 0],
+    ["LLM-routed pages", m.pipeline_counts?.pages_routed_llm ?? 0],
+    ["JS-rendered pages", m.pipeline_counts?.pages_rendered_with_js ?? 0],
     ["Gap-fill", m.gap_fill_used ? "Yes" : "No"],
   ];
   if (m.normalized_query && m.normalized_query !== (m.original_query || currentQuery)) {
@@ -535,9 +565,10 @@ const COL_PRIORITY = {
   headquarters: 1,
   location: 1,
   focus_area: 1,
-  funding_stage: 1,
+  website_or_repo: 1,
+  stage_or_status: 1,
   rating: 1,
-  cuisine: 1,
+  offering: 1,
   type: 1,
   // Medium — useful but narrower
   price_range: 2,

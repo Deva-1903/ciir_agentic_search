@@ -83,18 +83,28 @@ def test_cell_from_entity_own_domain_is_kept_even_without_name_mention():
 
 
 def test_weak_signal_columns_are_skipped():
+    # Short descriptive fields are too generic to verify against the entity
+    # name — they are expected to be skipped regardless of vertical.
     row = _row("Lucali", {
-        "cuisine_type": _cell(
+        "category": _cell(
             "Pizza",
             "https://random.com",
             "List of pizza shops",
             "pizza",
             conf=0.9,
         ),
+        "description": _cell(
+            "A cozy local spot",
+            "https://random.com",
+            "List of pizza shops",
+            "a cozy local spot",
+            conf=0.9,
+        ),
     })
     verify_row_cells(row)
-    # cuisine_type is in _SKIP_COLS and should not be penalized
-    assert row.cells["cuisine_type"].confidence == 0.9
+    # category and description are in _SKIP_COLS and should not be penalized.
+    assert row.cells["category"].confidence == 0.9
+    assert row.cells["description"].confidence == 0.9
 
 
 def test_row_aggregate_confidence_is_recomputed_when_penalized():

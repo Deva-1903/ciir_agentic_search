@@ -14,11 +14,16 @@ from app.utils.url import extract_domain
 
 log = get_logger(__name__)
 
-_OFFICIAL_HINTS = ("official", "about", "contact", "menu", "locations", "location")
-_WEBSITE_COLS = {"website", "url", "official_website", "homepage", "link"}
-_LISTING_PATH_HINTS = ("/category", "/categories", "/companies", "/directory", "/industry", "/list", "/lists")
-_LISTING_QUERY_HINTS = ("category=", "categories=", "industry=", "industries=")
-_LISTING_TITLE_HINTS = ("find top startups", "directory", "industry", "companies", "category")
+# Structural "this is an entity's canonical page" hints. Generic across
+# verticals — about/contact/home/docs are the common official-page markers.
+_OFFICIAL_HINTS = ("official", "about", "contact", "home", "docs", "overview")
+_WEBSITE_COLS = {
+    "website", "url", "official_website", "homepage", "link",
+    "website_or_repo", "website_or_profile", "site",
+}
+_LISTING_PATH_HINTS = ("/category", "/categories", "/directory", "/industry", "/list", "/lists", "/tag", "/tags")
+_LISTING_QUERY_HINTS = ("category=", "categories=", "industry=", "industries=", "tag=")
+_LISTING_TITLE_HINTS = ("directory", "industry", "category", "list of", "top ", "best ")
 
 
 def _canonical_homepage(url: str) -> str:
@@ -101,8 +106,15 @@ def _page_score_for_entity(row: EntityRow, page: ScrapedPage) -> float:
         return 0.0
 
     official_hint_url = f"https://{row.canonical_domain}/" if row.canonical_domain else None
-    kind, quality = classify_source(page.url, page.title, official_hint_url)
-    if kind in {"editorial", "directory", "marketplace"}:
+    kind, quality = classify_source(
+        page.url,
+        page.title,
+        official_hint_url,
+        source_regime=getattr(page, "evidence_regime", None),
+    )
+    if getattr(page, "evidence_regime", "unknown") in {"directory_listing", "editorial_article", "marketplace_aggregator"}:
+        return 0.0
+    if kind in {"editorial", "marketplace"}:
         return 0.0
 
     score = quality

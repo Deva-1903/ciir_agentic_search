@@ -273,14 +273,57 @@ async def test_extract_from_pages_accumulates_across_pages(monkeypatch):
     assert len(drafts) == 4, f"Expected 4 entities (one per page), got {len(drafts)}"
 
 
+@pytest.mark.asyncio
+async def test_extract_from_page_uses_deterministic_parser_before_llm(monkeypatch):
+    async def fail_chat_json(*args, **kwargs):
+        raise AssertionError("LLM path should not be used for repo/docs pages with sufficient deterministic signals")
+
+    monkeypatch.setattr(extractor, "chat_json", fail_chat_json)
+    monkeypatch.setattr(
+        extractor,
+        "get_settings",
+        lambda: SimpleNamespace(
+            chunk_token_limit=500,
+            max_chunks_per_page=1,
+            max_concurrent_extractions=1,
+            extract_llm_timeout_seconds=30.0,
+            extract_llm_max_attempts=1,
+        ),
+    )
+
+    plan = PlannerOutput(
+        query_family="software_project",
+        entity_type="software project",
+        columns=["name", "website_or_repo", "license", "language_or_stack", "maintainer_or_org"],
+    )
+    page = ScrapedPage(
+        url="https://github.com/langchain-ai/langchain",
+        title="langchain-ai/langchain: Build context-aware reasoning apps - GitHub",
+        cleaned_text="LangChain is a framework for building applications powered by language models. MIT license. Python.",
+        evidence_regime="software_repo_or_docs",
+        page_metadata={
+            "meta_description": "Build context-aware reasoning apps",
+            "headings": ["langchain"],
+        },
+    )
+
+    drafts = await extractor.extract_from_page("open source llm frameworks", plan, page, mode="fill")
+
+    assert len(drafts) == 1
+    assert drafts[0].cells["website_or_repo"].value == "https://github.com/langchain-ai/langchain"
+    assert drafts[0].cells["maintainer_or_org"].value == "langchain-ai"
+
+
 def test_build_candidate_discovery_plan_prefers_lightweight_columns():
     plan = PlannerOutput(
-        query_family="local_business",
-        entity_type="pizza place",
-        columns=["name", "website", "address", "phone_number", "category", "rating"],
+        query_family="place_venue",
+        entity_type="place",
+        columns=["name", "website", "location", "category", "offering", "contact_or_booking"],
         search_angles=["top pizza places in Brooklyn"],
     )
 
     discovery_plan = extractor.build_candidate_discovery_plan(plan)
 
-    assert discovery_plan.columns == ["name", "website", "address", "phone_number", "category", "rating"]
+    # Discovery mode takes the first 4 schema columns for a lightweight
+    # recall pass; the remaining columns are filled later in gap-fill.
+    assert discovery_plan.columns == ["name", "website", "location", "category"]

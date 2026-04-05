@@ -22,6 +22,7 @@ from pydantic import BaseModel
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
+from app.utils.text import estimate_tokens
 
 log = get_logger(__name__)
 
@@ -92,6 +93,7 @@ async def chat_json(
     timeout: float | None = None,
     attempts: int = 3,
     provider: str | None = None,
+    usage_stats: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     """
     Call the LLM in JSON mode. Returns the parsed dict.
@@ -119,6 +121,21 @@ async def chat_json(
                 timeout=timeout,
             )
             raw = response.choices[0].message.content or ""
+            prompt_tokens = 0
+            completion_tokens = 0
+            usage = getattr(response, "usage", None)
+            if usage is not None:
+                prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+                completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+            if not prompt_tokens:
+                prompt_tokens = estimate_tokens(system) + estimate_tokens(user)
+            if not completion_tokens:
+                completion_tokens = estimate_tokens(raw)
+            if usage_stats is not None:
+                usage_stats["llm_calls"] = usage_stats.get("llm_calls", 0) + 1
+                usage_stats["llm_prompt_tokens"] = usage_stats.get("llm_prompt_tokens", 0) + prompt_tokens
+                usage_stats["llm_completion_tokens"] = usage_stats.get("llm_completion_tokens", 0) + completion_tokens
+                usage_stats["llm_total_tokens"] = usage_stats.get("llm_total_tokens", 0) + prompt_tokens + completion_tokens
             try:
                 return _extract_json(raw)
             except ValueError as exc:
@@ -153,6 +170,7 @@ async def chat_json_validated(
     timeout: float | None = None,
     attempts: int = 3,
     provider: str | None = None,
+    usage_stats: dict[str, int] | None = None,
 ) -> BaseModel:
     """
     Like chat_json but also validates against a Pydantic model.
@@ -166,5 +184,6 @@ async def chat_json_validated(
         timeout=timeout,
         attempts=attempts,
         provider=provider,
+        usage_stats=usage_stats,
     )
     return model_class.model_validate(raw)

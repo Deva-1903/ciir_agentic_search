@@ -113,7 +113,7 @@ class TestComputeMetricsHappyPath:
             "duration_seconds": 12.3,
             "pages_scraped": 8,
             "gap_fill_used": True,
-            "query_family": "local_business",
+            "query_family": "place_venue",
             "normalized_query": "best pizza places in Brooklyn",
         }
         m = _compute_metrics(_make_result(
@@ -125,5 +125,98 @@ class TestComputeMetricsHappyPath:
         assert m["pages_scraped"] == 8
         assert m["gap_fill_used"] is True
         assert m["official_site_rate"] == 1.0
-        assert m["query_family"] == "local_business"
+        assert m["query_family"] == "place_venue"
         assert m["normalized_query"] == "best pizza places in Brooklyn"
+
+    def test_labeled_entity_and_field_metrics(self):
+        rows = [
+            {
+                "cells": {
+                    "name": {
+                        "value": "Prometheus",
+                        "source_url": "https://github.com/prometheus/prometheus",
+                        "evidence_snippet": "Prometheus",
+                        "confidence": 0.8,
+                    },
+                    "website_or_repo": {
+                        "value": "https://github.com/prometheus/prometheus",
+                        "source_url": "https://github.com/prometheus/prometheus",
+                        "evidence_snippet": "https://github.com/prometheus/prometheus",
+                        "confidence": 0.8,
+                    },
+                    "license": {
+                        "value": "Apache 2.0",
+                        "source_url": "https://github.com/prometheus/prometheus",
+                        "evidence_snippet": "Licensed under Apache 2.0",
+                        "confidence": 0.9,
+                    },
+                },
+                "aggregate_confidence": 0.92,
+            },
+            {
+                "cells": {
+                    "name": {
+                        "value": "Grafana",
+                        "source_url": "https://grafana.com/oss/",
+                        "evidence_snippet": "Grafana",
+                        "confidence": 0.8,
+                    },
+                    "website_or_repo": {
+                        "value": "https://grafana.com/oss/",
+                        "source_url": "https://grafana.com/oss/",
+                        "evidence_snippet": "https://grafana.com/oss/",
+                        "confidence": 0.8,
+                    },
+                },
+                "aggregate_confidence": 0.88,
+            },
+        ]
+        query_spec = {
+            "expected_entities": [
+                {
+                    "name": "Prometheus",
+                    "aliases": ["Prometheus.io"],
+                    "key_fields": {
+                        "website_or_repo": ["github.com/prometheus/prometheus"],
+                        "license": ["Apache 2.0"],
+                    },
+                },
+                {
+                    "name": "Grafana",
+                    "key_fields": {
+                        "website_or_repo": ["grafana.com"],
+                    },
+                },
+            ]
+        }
+
+        m = _compute_metrics(_make_result(rows, ["name", "website_or_repo", "license"]), query_spec)
+
+        assert m["has_labels"] is True
+        assert m["entity_precision"] == 1.0
+        assert m["entity_recall"] == 1.0
+        assert m["field_accuracy"] == 1.0
+        assert m["citation_presence_rate"] == 1.0
+
+    def test_labeled_metrics_penalize_missing_entities_and_fields(self):
+        rows = [
+            {
+                "cells": {
+                    "name": _cell("https://example.com", "Prometheus"),
+                },
+                "aggregate_confidence": 0.6,
+            }
+        ]
+        query_spec = {
+            "expected_entities": [
+                {"name": "Prometheus", "key_fields": ["website_or_repo"]},
+                {"name": "Grafana", "key_fields": ["website_or_repo"]},
+            ]
+        }
+
+        m = _compute_metrics(_make_result(rows, ["name", "website_or_repo"]), query_spec)
+
+        assert m["entity_precision"] == 1.0
+        assert m["entity_recall"] == 0.5
+        assert m["field_accuracy"] == 0.0
+        assert m["citation_presence_rate"] == 0.0

@@ -1,44 +1,58 @@
 """
 Ranker: score and sort EntityRows.
 
-Score components (all normalised to [0,1]):
-  - completeness   : fraction of schema columns that have a cell value
-  - avg_confidence : mean confidence across all cells
-  - source_support : log-scaled number of source URLs (more = better)
-  - actionable     : bonus for having at least one actionable non-name field
-  - source_quality : heuristic evidence quality of contributing sources
-
-Final score = weighted sum. Simple, explainable, no magic.
+The ranker remains a transparent weighted sum, but now includes a few
+intent-aware features:
+  - field importance by query family
+  - local / geographic fit when the query implies a location
+  - freshness when the query asks for recency
+  - official-source preference by family
+  - structured-source preference by family
+  - lightweight reputation signals when available
 """
 
 from __future__ import annotations
 
 import math
+import re
+from datetime import datetime, timezone
 
+from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.models.schema import EntityRow, PlannerOutput
-from app.services.source_quality import row_source_quality
+from app.services.source_quality import (
+    row_evidence_regime_profile,
+    row_source_profile,
+    row_source_quality,
+)
 from app.utils.url import extract_domain
-from app.core.config import get_settings
 
 log = get_logger(__name__)
 
 _WEIGHTS = {
-    "completeness": 0.25,
-    "avg_confidence": 0.20,
-    "source_support": 0.08,
-    "actionable": 0.07,
-    "source_quality": 0.32,
-    "source_diversity": 0.08,
+    "completeness": 0.16,
+    "field_importance": 0.12,
+    "avg_confidence": 0.16,
+    "source_support": 0.06,
+    "actionable": 0.05,
+    "source_quality": 0.18,
+    "source_diversity": 0.05,
+    "local_fit": 0.08,
+    "freshness": 0.04,
+    "reputation": 0.04,
+    "official_fit": 0.04,
+    "structured_fit": 0.02,
 }
 
 _WEAK_SIGNAL_COLS = {
     "category",
-    "cuisine_type",
     "description",
     "industry",
+    "notes",
     "overview",
     "summary",
+    "tagline",
+    "tags",
     "type",
 }
 
@@ -46,15 +60,57 @@ _GENERIC_NAME_TERMS = {
     "business",
     "company",
     "entity",
-    "local business",
+    "item",
     "organization",
-    "pizza place",
+    "place",
+    "platform",
     "product",
-    "restaurant",
-    "software tool",
-    "startup",
+    "service",
+    "thing",
     "tool",
 }
+
+_FIELD_IMPORTANCE = {
+    "organization_company": {
+        "website": 0.28,
+        "headquarters": 0.2,
+        "focus_area": 0.18,
+        "product_or_service": 0.2,
+        "stage_or_status": 0.14,
+    },
+    "place_venue": {
+        "website": 0.18,
+        "location": 0.32,
+        "category": 0.16,
+        "offering": 0.14,
+        "contact_or_booking": 0.2,
+    },
+    "software_project": {
+        "website_or_repo": 0.3,
+        "primary_use_case": 0.22,
+        "license": 0.16,
+        "language_or_stack": 0.14,
+        "maintainer_or_org": 0.18,
+    },
+    "product_offering": {
+        "website": 0.24,
+        "category": 0.18,
+        "key_feature": 0.24,
+        "price_or_availability": 0.14,
+        "maker_or_brand": 0.2,
+    },
+    "person_group": {
+        "affiliation": 0.28,
+        "role_or_title": 0.24,
+        "notable_work": 0.2,
+        "location": 0.14,
+        "website_or_profile": 0.14,
+    },
+}
+
+_LOCATION_RE = re.compile(r"\b(?:in|near|around|at|from)\s+([a-z0-9 ,.'-]+)$", re.IGNORECASE)
+_FRESHNESS_RE = re.compile(r"\b(?:19|20)\d{2}\b")
+_FRESHNESS_HINTS = ("current", "fresh", "latest", "new", "recent", "today")
 
 
 def _is_actionable_col(col: str) -> bool:
@@ -80,10 +136,6 @@ def _row_name_is_generic(row: EntityRow, plan: PlannerOutput) -> bool:
 
 
 def _source_diversity(row: EntityRow) -> float:
-    """
-    Fraction of cells NOT contributed by the single most-dominant domain.
-    1.0 = every cell from a different domain; 0.0 = all cells from one domain.
-    """
     if not row.cells:
         return 0.0
     counts: dict[str, int] = {}
@@ -96,42 +148,184 @@ def _source_diversity(row: EntityRow) -> float:
 
 
 def _get_weights() -> dict[str, float]:
-    """Return weights with source_diversity from config (supports ablation)."""
     settings = get_settings()
-    w = dict(_WEIGHTS)
-    w["source_diversity"] = settings.source_diversity_weight
-    return w
+    weights = dict(_WEIGHTS)
+    weights["source_diversity"] = settings.source_diversity_weight
+    return weights
 
 
-def _score(row: EntityRow, num_columns: int) -> float:
-    completeness = len(row.cells) / max(num_columns, 1)
+def _field_importance_score(row: EntityRow, plan: PlannerOutput) -> float:
+    configured = _FIELD_IMPORTANCE.get(plan.query_family)
+    if not configured:
+        non_name = [col for col in plan.columns if col != "name"]
+        if not non_name:
+            return 0.0
+        filled = sum(1 for col in non_name if col in row.cells)
+        return filled / len(non_name)
+    return round(sum(weight for col, weight in configured.items() if col in row.cells), 3)
 
-    confs = [c.confidence for c in row.cells.values()]
-    avg_conf = sum(confs) / len(confs) if confs else 0.0
 
-    # log2(1 + sources) / log2(1 + 10) normalised against 10 sources max
+def _extract_location_phrase(query: str | None) -> str:
+    if not query:
+        return ""
+    match = _LOCATION_RE.search(query.strip())
+    return match.group(1).strip().lower() if match else ""
+
+
+def _token_overlap(a: str, b: str) -> float:
+    left = {token for token in re.findall(r"[a-z0-9]+", a.lower()) if len(token) > 1}
+    right = {token for token in re.findall(r"[a-z0-9]+", b.lower()) if len(token) > 1}
+    if not left or not right:
+        return 0.0
+    return len(left & right) / len(left)
+
+
+def _local_fit(row: EntityRow, plan: PlannerOutput, query: str | None) -> float:
+    if plan.query_family not in {"organization_company", "person_group", "place_venue"}:
+        return 0.5
+
+    location_phrase = _extract_location_phrase(query)
+    if not location_phrase:
+        return 0.5
+
+    candidates = []
+    for col in ("location", "address", "headquarters"):
+        cell = row.cells.get(col)
+        if cell:
+            candidates.append(cell.value)
+
+    if not candidates:
+        return 0.2 if plan.query_family == "place_venue" else 0.4
+
+    best = max(_token_overlap(location_phrase, candidate) for candidate in candidates)
+    if best >= 0.8:
+        return 1.0
+    if best >= 0.5:
+        return 0.8
+    if best >= 0.25:
+        return 0.55
+    return 0.2
+
+
+def _query_wants_freshness(query: str | None) -> bool:
+    if not query:
+        return False
+    q = query.lower()
+    return bool(_FRESHNESS_RE.search(q)) or any(hint in q for hint in _FRESHNESS_HINTS)
+
+
+def _freshness_score(row: EntityRow, query: str | None) -> float:
+    if not _query_wants_freshness(query):
+        return 0.5
+
+    current_year = datetime.now(timezone.utc).year
+    years: list[int] = []
+    for cell in row.cells.values():
+        for source_text in (cell.source_url, cell.source_title or ""):
+            for match in re.finditer(r"\b(19|20)\d{2}\b", source_text):
+                try:
+                    years.append(int(match.group(0)))
+                except ValueError:
+                    continue
+
+    if not years:
+        return 0.45
+
+    freshest = max(years)
+    if freshest >= current_year:
+        return 1.0
+    if freshest == current_year - 1:
+        return 0.85
+    if freshest >= current_year - 2:
+        return 0.7
+    return 0.45
+
+
+def _reputation_score(row: EntityRow) -> float:
+    if any(col in row.cells for col in ("rating", "score")):
+        return 1.0
+    profile = row_source_profile(row)
+    if row.sources_count >= 3:
+        return 0.85
+    if profile["editorial"] >= 1 and row.sources_count >= 2:
+        return 0.75
+    return 0.5
+
+
+def _official_fit(row: EntityRow, plan: PlannerOutput) -> float:
+    profile = row_source_profile(row)
+    regimes = row_evidence_regime_profile(row)
+
+    if plan.query_family == "software_project":
+        if regimes["software_repo_or_docs"] > 0 or profile["official"] > 0:
+            return 1.0
+        return 0.4
+
+    if plan.query_family in {"organization_company", "place_venue", "product_offering", "person_group"}:
+        if profile["official"] > 0 or row.canonical_domain:
+            return 1.0
+        if regimes["official_site"] > 0:
+            return 0.78
+        return 0.35
+
+    return 0.5
+
+
+def _structured_fit(row: EntityRow, plan: PlannerOutput) -> float:
+    regimes = row_evidence_regime_profile(row)
+
+    if plan.query_family == "software_project":
+        return 1.0 if regimes["software_repo_or_docs"] > 0 else 0.4
+
+    if plan.query_family == "place_venue":
+        if regimes["local_business_listing"] > 0:
+            return 1.0
+        if regimes["directory_listing"] > 0:
+            return 0.75
+        return 0.4
+
+    if plan.query_family in {"organization_company", "product_offering"}:
+        if regimes["directory_listing"] > 0 or regimes["editorial_article"] > 0:
+            return 0.8
+        return 0.45
+
+    return 0.5
+
+
+def score_breakdown(row: EntityRow, plan: PlannerOutput, query: str | None = None) -> dict[str, float]:
+    num_columns = max(len(plan.columns), 1)
+    completeness = len(row.cells) / num_columns
+
+    confs = [cell.confidence for cell in row.cells.values()]
+    avg_confidence = sum(confs) / len(confs) if confs else 0.0
+
     source_support = math.log2(1 + row.sources_count) / math.log2(11)
     source_support = min(source_support, 1.0)
 
-    actionable = float(
-        any(_is_actionable_col(col) for col in row.cells)
-    )
-    source_quality = row_source_quality(row)
-    source_diversity = _source_diversity(row)
+    breakdown = {
+        "completeness": round(completeness, 3),
+        "field_importance": round(_field_importance_score(row, plan), 3),
+        "avg_confidence": round(avg_confidence, 3),
+        "source_support": round(source_support, 3),
+        "actionable": float(any(_is_actionable_col(col) for col in row.cells)),
+        "source_quality": row_source_quality(row),
+        "source_diversity": _source_diversity(row),
+        "local_fit": round(_local_fit(row, plan, query), 3),
+        "freshness": round(_freshness_score(row, query), 3),
+        "reputation": round(_reputation_score(row), 3),
+        "official_fit": round(_official_fit(row, plan), 3),
+        "structured_fit": round(_structured_fit(row, plan), 3),
+    }
+    return breakdown
 
-    w = _get_weights()
-    return (
-        w["completeness"] * completeness
-        + w["avg_confidence"] * avg_conf
-        + w["source_support"] * source_support
-        + w["actionable"] * actionable
-        + w["source_quality"] * source_quality
-        + w["source_diversity"] * source_diversity
-    )
+
+def _score(row: EntityRow, plan: PlannerOutput, query: str | None = None) -> float:
+    breakdown = score_breakdown(row, plan, query)
+    weights = _get_weights()
+    return sum(weights[key] * breakdown[key] for key in weights)
 
 
 def is_row_viable(row: EntityRow, plan: PlannerOutput) -> bool:
-    """Return True if a row has enough grounded detail to be useful."""
     if "name" not in row.cells:
         return False
 
@@ -149,7 +343,6 @@ def is_row_viable(row: EntityRow, plan: PlannerOutput) -> bool:
 
 
 def is_row_obviously_bad(row: EntityRow, plan: PlannerOutput) -> bool:
-    """Hard rejection only for rows that are clearly not useful entity candidates."""
     if "name" not in row.cells:
         return True
 
@@ -163,10 +356,6 @@ def is_row_obviously_bad(row: EntityRow, plan: PlannerOutput) -> bool:
 
 
 def prune_rows(rows: list[EntityRow], plan: PlannerOutput) -> list[EntityRow]:
-    """
-    Drop only obvious garbage rows. Discovery systems should rank first and kill late.
-    Falls back to the original set if pruning would remove everything.
-    """
     pruned = [row for row in rows if not is_row_obviously_bad(row, plan)]
     if pruned:
         removed = len(rows) - len(pruned)
@@ -179,11 +368,13 @@ def prune_rows(rows: list[EntityRow], plan: PlannerOutput) -> list[EntityRow]:
     return rows
 
 
-def rank_rows(rows: list[EntityRow], plan: PlannerOutput) -> list[EntityRow]:
-    """Return rows sorted by score descending."""
-    num_cols = len(plan.columns)
-    scored = [(row, _score(row, num_cols)) for row in rows]
-    scored.sort(key=lambda x: x[1], reverse=True)
+def rank_rows(
+    rows: list[EntityRow],
+    plan: PlannerOutput,
+    query: str | None = None,
+) -> list[EntityRow]:
+    scored = [(row, _score(row, plan, query=query)) for row in rows]
+    scored.sort(key=lambda item: item[1], reverse=True)
     result = [row for row, _ in scored]
     log.info("Ranked %d rows", len(result))
     return result
@@ -193,17 +384,12 @@ def find_sparse_rows(
     rows: list[EntityRow],
     plan: PlannerOutput,
     top_n: int = 3,
+    query: str | None = None,
 ) -> list[EntityRow]:
-    """
-    Return up to top_n rows with the most missing columns.
-    Used by gap_fill.py to decide which entities to enrich.
-    Only considers rows that already have a 'name' cell.
-    """
-    num_cols = len(plan.columns)
-    candidates = [r for r in rows if "name" in r.cells and not is_row_obviously_bad(r, plan)]
+    candidates = [row for row in rows if "name" in row.cells and not is_row_obviously_bad(row, plan)]
 
     def _missing(row: EntityRow) -> int:
-        return num_cols - len(row.cells)
+        return len(plan.columns) - len(row.cells)
 
-    candidates.sort(key=lambda row: (_missing(row), _score(row, num_cols)), reverse=True)
+    candidates.sort(key=lambda row: (_missing(row), _score(row, plan, query=query)), reverse=True)
     return candidates[:top_n]

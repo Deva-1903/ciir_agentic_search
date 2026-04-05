@@ -45,7 +45,7 @@ def _pick_better_cell(existing: Cell, candidate: Cell) -> Cell:
 
 def _website_from_cells(cells: dict[str, Cell]) -> Optional[str]:
     """Extract website URL from cells dict if present."""
-    for key in ("website", "url", "official_website", "homepage"):
+    for key in ("website", "url", "official_website", "homepage", "website_or_repo", "website_or_profile", "site"):
         if key in cells:
             return cells[key].value
     return None
@@ -53,7 +53,7 @@ def _website_from_cells(cells: dict[str, Cell]) -> Optional[str]:
 
 def _draft_website(draft: EntityDraft) -> Optional[str]:
     """Get website value from a draft's cells."""
-    for key in ("website", "url", "official_website", "homepage"):
+    for key in ("website", "url", "official_website", "homepage", "website_or_repo", "website_or_profile", "site"):
         if key in draft.cells:
             return draft.cells[key].value
     return None

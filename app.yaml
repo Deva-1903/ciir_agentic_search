@@ -1,0 +1,69 @@
+name: agentic-search
+region: nyc
+
+services:
+  - name: web
+    environment_slug: python
+    github:
+      # Replace with your actual GitHub repo before creating the app from spec,
+      # or mirror these values manually in the DigitalOcean UI.
+      repo: your-github-user/agentic-search
+      branch: main
+      deploy_on_push: true
+    source_dir: /
+    instance_count: 1
+    http_port: 8080
+    build_command: pip install -r requirements.txt
+    run_command: sh -c 'uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080}'
+    health_check:
+      http_path: /api/health
+      initial_delay_seconds: 15
+      period_seconds: 15
+      timeout_seconds: 5
+      success_threshold: 1
+      failure_threshold: 3
+    envs:
+      - key: APP_ENV
+        value: production
+        scope: RUN_TIME
+        type: GENERAL
+      - key: LOG_LEVEL
+        value: INFO
+        scope: RUN_TIME
+        type: GENERAL
+      - key: DB_PATH
+        value: /tmp/agentic_search.db
+        scope: RUN_TIME
+        type: GENERAL
+      - key: OPENAI_MODEL
+        value: gpt-4o-mini
+        scope: RUN_TIME
+        type: GENERAL
+      - key: PLANNER_PROVIDER
+        value: openai
+        scope: RUN_TIME
+        type: GENERAL
+      - key: EXTRACTOR_PROVIDER
+        value: openai
+        scope: RUN_TIME
+        type: GENERAL
+      - key: JS_RENDERING_ENABLED
+        value: "false"
+        scope: RUN_TIME
+        type: GENERAL
+      - key: BRAVE_API_KEY
+        value: REPLACE_IN_DIGITALOCEAN_UI
+        scope: RUN_TIME
+        type: SECRET
+      - key: OPENAI_API_KEY
+        value: REPLACE_IN_DIGITALOCEAN_UI
+        scope: RUN_TIME
+        type: SECRET
+
+# Optional envs you may add in the DigitalOcean UI if needed:
+# GROQ_API_KEY
+# GROQ_MODEL
+# GROQ_BASE_URL
+# OPENAI_BASE_URL
+# JS_RENDER_MAX_PAGES
+# JS_RENDER_TIMEOUT

@@ -108,6 +108,37 @@ class TestRankRows:
         ranked = rank_rows([weak, strong], plan)
         assert ranked[0].entity_id == "strong"
 
+    def test_location_match_boosts_place_query(self):
+        plan = PlannerOutput(
+            query_family="place_venue",
+            entity_type="place",
+            columns=["name", "location", "website"],
+        )
+        matching = EntityRow(
+            entity_id="brooklyn",
+            cells={
+                "name": _cell("Lucali"),
+                "location": _cell("Brooklyn, New York"),
+                "website": _cell("https://lucali.com"),
+            },
+            aggregate_confidence=0.9,
+            sources_count=2,
+        )
+        mismatching = EntityRow(
+            entity_id="queens",
+            cells={
+                "name": _cell("Other Place"),
+                "location": _cell("Queens, New York"),
+                "website": _cell("https://other.com"),
+            },
+            aggregate_confidence=0.9,
+            sources_count=2,
+        )
+
+        ranked = rank_rows([mismatching, matching], plan, query="best pizza places in Brooklyn, New York")
+
+        assert ranked[0].entity_id == "brooklyn"
+
 
 class TestSourceDiversity:
     def test_multi_domain_row_beats_single_domain_row_when_others_equal(self):
@@ -151,8 +182,11 @@ class TestSourceDiversity:
 
 class TestPruneRows:
     def test_prunes_generic_name_plus_one_weak_field_rows(self):
-        plan = _plan(["name", "address", "cuisine_type", "rating"])
-        weak = _row("weak", {"name": "Pizza Place", "cuisine_type": "Pizza"})
+        # A row whose name is a generic entity-type noun ("place", "company",
+        # "tool") and has only weak-signal columns is a category label, not
+        # an entity. Such rows should be pruned regardless of vertical.
+        plan = _plan(["name", "address", "category", "rating"])
+        weak = _row("weak", {"name": "Place", "category": "Pizza"})
         actionable = _row("good", {"name": "Lucali", "address": "575 Henry St"})
 
         pruned = prune_rows([weak, actionable], plan)
@@ -160,8 +194,8 @@ class TestPruneRows:
         assert [row.entity_id for row in pruned] == ["good"]
 
     def test_falls_back_to_original_rows_when_everything_is_pruned(self):
-        plan = _plan(["name", "cuisine_type", "rating"])
-        weak = _row("weak", {"name": "Pizza Place", "cuisine_type": "Pizza"})
+        plan = _plan(["name", "category", "rating"])
+        weak = _row("weak", {"name": "Place", "category": "Pizza"})
 
         pruned = prune_rows([weak], plan)
 
@@ -198,8 +232,8 @@ class TestFindSparseRows:
         assert len(result) <= 3
 
     def test_skips_low_information_rows(self):
-        plan = _plan(["name", "address", "cuisine_type", "rating"])
-        weak = _row("weak", {"name": "Pizza Place", "cuisine_type": "Pizza"})
+        plan = _plan(["name", "address", "category", "rating"])
+        weak = _row("weak", {"name": "Place", "category": "Pizza"})
         actionable = _row("good", {"name": "Lucali", "address": "575 Henry St"})
 
         result = find_sparse_rows([weak, actionable], plan, top_n=3)

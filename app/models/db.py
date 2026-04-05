@@ -42,6 +42,9 @@ async def init_db() -> None:
                 url           TEXT PRIMARY KEY,
                 title         TEXT,
                 cleaned_text  TEXT,
+                raw_html      TEXT,
+                page_metadata_json TEXT,
+                fetch_method  TEXT DEFAULT 'static',
                 scraped_at    TEXT,
                 status        TEXT DEFAULT 'ok'
             )
@@ -60,6 +63,8 @@ async def init_db() -> None:
         """)
         await db.commit()
 
+        await _ensure_scraped_page_columns(db)
+
         # Mark any jobs that were running when the server last died as failed
         await db.execute(
             "UPDATE query_jobs SET status='failed', error='Server restarted while job was running' "
@@ -67,6 +72,21 @@ async def init_db() -> None:
         )
         await db.commit()
     log.info("Database initialised at %s", path)
+
+
+async def _ensure_scraped_page_columns(db: aiosqlite.Connection) -> None:
+    """Backfill columns added after the original scraped_pages schema."""
+    async with db.execute("PRAGMA table_info(scraped_pages)") as cur:
+        rows = await cur.fetchall()
+    existing = {row[1] for row in rows}
+
+    if "raw_html" not in existing:
+        await db.execute("ALTER TABLE scraped_pages ADD COLUMN raw_html TEXT")
+    if "page_metadata_json" not in existing:
+        await db.execute("ALTER TABLE scraped_pages ADD COLUMN page_metadata_json TEXT")
+    if "fetch_method" not in existing:
+        await db.execute("ALTER TABLE scraped_pages ADD COLUMN fetch_method TEXT DEFAULT 'static'")
+    await db.commit()
 
 
 # ── Scraped pages cache ────────────────────────────────────────────────────────
@@ -83,22 +103,52 @@ async def get_cached_page(url: str) -> Optional[dict]:
         ) as cur:
             row = await cur.fetchone()
     if row:
-        return dict(row)
+        payload = dict(row)
+        metadata_json = payload.get("page_metadata_json")
+        if metadata_json:
+            try:
+                payload["page_metadata"] = json.loads(metadata_json)
+            except Exception:
+                payload["page_metadata"] = {}
+        else:
+            payload["page_metadata"] = {}
+        return payload
     return None
 
 
-async def save_cached_page(url: str, title: str, cleaned_text: str) -> None:
+async def save_cached_page(
+    url: str,
+    title: str,
+    cleaned_text: str,
+    *,
+    raw_html: str | None = None,
+    page_metadata: dict | None = None,
+    fetch_method: str = "static",
+) -> None:
     async with aiosqlite.connect(_db_path()) as db:
         await db.execute(
             """
-            INSERT INTO scraped_pages (url, title, cleaned_text, scraped_at, status)
-            VALUES (?, ?, ?, ?, 'ok')
+            INSERT INTO scraped_pages (
+                url, title, cleaned_text, raw_html, page_metadata_json, fetch_method, scraped_at, status
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'ok')
             ON CONFLICT(url) DO UPDATE SET
                 title = excluded.title,
                 cleaned_text = excluded.cleaned_text,
+                raw_html = excluded.raw_html,
+                page_metadata_json = excluded.page_metadata_json,
+                fetch_method = excluded.fetch_method,
                 scraped_at = excluded.scraped_at
             """,
-            (url, title, cleaned_text, datetime.now(timezone.utc).isoformat()),
+            (
+                url,
+                title,
+                cleaned_text,
+                raw_html,
+                json.dumps(page_metadata or {}),
+                fetch_method,
+                datetime.now(timezone.utc).isoformat(),
+            ),
         )
         await db.commit()
 

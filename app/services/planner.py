@@ -1,13 +1,21 @@
 """
-Constrained schema planner.
+Constrained schema planner — structural entity-kind families.
 
 The planner intentionally separates:
-  1. query-family classification (deterministic + stable)
-  2. schema template selection (deterministic + domain-appropriate)
+  1. entity-kind classification (structural, not example-specific)
+  2. schema template selection (deterministic per kind)
   3. facet generation (LLM-assisted when available, deterministic fallback)
 
+Design principle: the families describe the *shape* of entities being
+discovered, not specific verticals. A restaurant and a hiking trail are
+both `place_venue` because they are physical locations with categories
+and contact/visit info. A startup and a university are both
+`organization_company` because they are organizations with a focus area
+and operational footprint.
+
 This keeps the planner expressive enough for typed retrieval facets while
-avoiding fragile generic plans such as entity_type="entity" with vague columns.
+avoiding fragile generic plans such as entity_type="entity" with vague
+columns, and without rewarding specific verticals.
 """
 
 from __future__ import annotations
@@ -37,64 +45,127 @@ class _FacetPlan(BaseModel):
     facets: list[SearchFacet] = Field(default_factory=list)
 
 
-_FAMILY_KEYWORDS = {
-    "local_business": (
-        "restaurant", "restaurants", "pizza", "ramen", "coffee", "roaster", "roasters",
-        "cafe", "cafes", "bar", "bars", "shop", "shops", "hostel", "hostels",
-        "hotel", "hotels", "bakery", "bakeries", "trail", "trails", "near",
-    ),
-    "startup_company": (
-        "startup", "startups", "series a", "series b", "founded", "founding",
-        "funding", "seed", "venture", "vc", "ai startups",
-    ),
-    "software_tool": (
-        "software", "tool", "tools", "app", "apps", "platform", "platforms",
-        "developer", "devtools", "open source", "open-source", "database",
-        "databases", "library", "libraries", "framework", "frameworks", "sdk",
-    ),
-    "product_category": (
-        "product", "products", "brand", "brands", "headphones", "laptop",
-        "laptops", "camera", "cameras", "sneakers", "phone", "phones",
-    ),
-    "organization": (
-        "company", "companies", "organization", "organizations", "nonprofit",
-        "foundation", "association", "hospital", "hospitals", "university",
-        "universities", "clinic", "clinics",
-    ),
+# ── Structural entity-kind signals ────────────────────────────────────────────
+#
+# Keywords here are intentionally structural, not example-specific.
+# Each group contains high-level nouns that imply an entity shape.
+# The classifier uses them as soft hints combined with query structure
+# (e.g. "in <location>" phrases for places).
+
+_ORG_SIGNALS = (
+    # organizational / legal-entity nouns
+    "company", "companies", "corporation", "corporations", "firm", "firms",
+    "agency", "agencies", "organization", "organizations", "org", "orgs",
+    "startup", "startups", "nonprofit", "nonprofits", "foundation", "foundations",
+    "institution", "institutions", "association", "associations", "society",
+    "societies", "enterprise", "enterprises", "group", "groups", "team", "teams",
+    "lab", "labs", "studio", "studios", "publisher", "publishers",
+    # organizational activity terms that strongly imply org shape
+    "vc", "venture", "investor", "investors", "funded", "funding", "series",
+    "founded", "founders", "ipo", "acquired", "operator", "operators",
+)
+
+_PLACE_SIGNALS = (
+    # physical-place nouns (broad, not vertical-tied)
+    "place", "places", "venue", "venues", "location", "locations", "spot", "spots",
+    "destination", "destinations", "site", "sites", "landmark", "landmarks",
+    "park", "parks", "trail", "trails", "route", "routes", "beach", "beaches",
+    "museum", "museums", "gallery", "galleries", "market", "markets",
+    "shop", "shops", "store", "stores", "outlet", "outlets",
+    "restaurant", "restaurants", "cafe", "cafes", "bar", "bars", "pub", "pubs",
+    "bakery", "bakeries", "diner", "diners",
+    "hotel", "hotels", "hostel", "hostels", "inn", "inns", "lodge", "lodges",
+    "resort", "resorts", "motel", "motels",
+    "stadium", "stadiums", "arena", "arenas", "theater", "theatres", "theaters",
+    "clinic", "clinics", "hospital", "hospitals", "school", "schools",
+    "library", "libraries",
+)
+
+_SOFTWARE_SIGNALS = (
+    "software", "program", "programs", "application", "applications",
+    "app", "apps", "tool", "tools", "toolkit", "toolkits",
+    "platform", "platforms", "framework", "frameworks", "library", "libraries",
+    "package", "packages", "sdk", "sdks", "api", "apis", "cli",
+    "database", "databases", "repo", "repos", "repository", "repositories",
+    "engine", "engines", "module", "modules", "plugin", "plugins",
+    "extension", "extensions", "script", "scripts", "runtime", "runtimes",
+    "compiler", "compilers", "interpreter", "interpreters",
+    "open source", "open-source", "opensource", "foss",
+    "devtool", "devtools", "developer",
+)
+
+_PRODUCT_SIGNALS = (
+    "product", "products", "brand", "brands", "model", "models",
+    "item", "items", "goods", "gadget", "gadgets", "device", "devices",
+    "appliance", "appliances", "equipment", "gear",
+)
+
+_PERSON_SIGNALS = (
+    "person", "people", "individual", "individuals",
+    "author", "authors", "writer", "writers", "researcher", "researchers",
+    "scientist", "scientists", "engineer", "engineers", "developer", "developers",
+    "founder", "founders", "ceo", "executive", "executives",
+    "artist", "artists", "designer", "designers", "musician", "musicians",
+    "professor", "professors", "expert", "experts", "speaker", "speakers",
+    "contributor", "contributors", "maintainer", "maintainers",
+)
+
+_LOCATION_PREPOSITIONS = (" in ", " near ", " around ", " at ", " from ")
+
+_GENERIC_ENTITY_TYPES = {
+    "entity", "entities", "item", "items", "thing", "things",
+    "business", "businesses", "organization", "organizations",
+    "company", "companies", "product", "products",
+    "tool", "tools", "place", "places",
 }
 
-_GENERIC_ENTITY_TYPES = {"entity", "business", "company", "organization", "item"}
+# ── Schema templates (structural, reusable across verticals) ─────────────────
 
 _SCHEMA_TEMPLATES = {
-    "local_business": _SchemaTemplate(
-        query_family="local_business",
-        entity_type="local business",
-        columns=["name", "website", "address", "phone_number", "category", "rating"],
-    ),
-    "startup_company": _SchemaTemplate(
-        query_family="startup_company",
-        entity_type="startup",
-        columns=["name", "website", "headquarters", "focus_area", "product_or_service", "funding_stage"],
-    ),
-    "software_tool": _SchemaTemplate(
-        query_family="software_tool",
-        entity_type="software tool",
-        columns=["name", "website", "primary_use_case", "license", "language", "github_repo"],
-    ),
-    "product_category": _SchemaTemplate(
-        query_family="product_category",
-        entity_type="product",
-        columns=["name", "website", "category", "price_range", "key_feature", "availability"],
-    ),
-    "organization": _SchemaTemplate(
-        query_family="organization",
+    "organization_company": _SchemaTemplate(
+        query_family="organization_company",
         entity_type="organization",
-        columns=["name", "website", "location", "focus_area", "organization_type", "leadership"],
+        columns=[
+            "name", "website", "headquarters",
+            "focus_area", "product_or_service", "stage_or_status",
+        ],
     ),
-    "fallback_generic": _SchemaTemplate(
-        query_family="fallback_generic",
+    "place_venue": _SchemaTemplate(
+        query_family="place_venue",
+        entity_type="place",
+        columns=[
+            "name", "website", "location",
+            "category", "offering", "contact_or_booking",
+        ],
+    ),
+    "software_project": _SchemaTemplate(
+        query_family="software_project",
+        entity_type="software project",
+        columns=[
+            "name", "website_or_repo", "primary_use_case",
+            "license", "language_or_stack", "maintainer_or_org",
+        ],
+    ),
+    "product_offering": _SchemaTemplate(
+        query_family="product_offering",
+        entity_type="product",
+        columns=[
+            "name", "website", "category",
+            "key_feature", "price_or_availability", "maker_or_brand",
+        ],
+    ),
+    "person_group": _SchemaTemplate(
+        query_family="person_group",
+        entity_type="person",
+        columns=[
+            "name", "affiliation", "role_or_title",
+            "notable_work", "location", "website_or_profile",
+        ],
+    ),
+    "generic_entity_list": _SchemaTemplate(
+        query_family="generic_entity_list",
         entity_type="entity",
-        columns=["name", "website", "location", "category", "notable_attribute"],
+        columns=["name", "website", "description", "category", "location"],
     ),
 }
 
@@ -116,7 +187,7 @@ Return ONLY a JSON object with exactly these keys:
 
 Rules:
 - You are given a fixed query family and fixed schema columns. Do not invent a new family.
-- Keep the entity_type specific when possible. Avoid generic words like "entity".
+- Keep the entity_type specific when possible. Avoid generic words like "entity" or "item".
 - Produce 4–5 facets.
 - Every facet query must be materially different in retrieval intent.
 - expected_fill_columns may only use the provided schema columns.
@@ -131,75 +202,120 @@ Fixed schema columns: {columns}
 Produce a retrieval plan with family-appropriate facets."""
 
 
+# ── Classification ────────────────────────────────────────────────────────────
+
+def _contains_signal(query_lc: str, signals: tuple[str, ...]) -> bool:
+    # Match signal tokens on word boundaries where reasonable.
+    for token in signals:
+        if " " in token:
+            if token in query_lc:
+                return True
+            continue
+        # Word-boundary match for single words.
+        if re.search(rf"(?<![a-z]){re.escape(token)}(?![a-z])", query_lc):
+            return True
+    return False
+
+
+def _has_location_phrase(query_lc: str) -> bool:
+    return any(marker in query_lc for marker in _LOCATION_PREPOSITIONS)
+
+
 def classify_query_family(query: str) -> str:
-    """Map a raw query to a small stable family set."""
+    """Classify a query into a structural entity-kind family.
+
+    Order matters: stronger structural signals win over weaker ones.
+    Software signals are checked before organization because many software
+    queries also mention "open source" or "platform". Place signals combined
+    with a location phrase win over generic org signals.
+    """
     q = query.lower()
 
-    # Prefer software over organization when both are present.
-    if any(token in q for token in _FAMILY_KEYWORDS["software_tool"]):
-        return "software_tool"
-    if any(token in q for token in _FAMILY_KEYWORDS["startup_company"]):
-        return "startup_company"
+    is_software = _contains_signal(q, _SOFTWARE_SIGNALS)
+    is_place = _contains_signal(q, _PLACE_SIGNALS)
+    is_org = _contains_signal(q, _ORG_SIGNALS)
+    is_product = _contains_signal(q, _PRODUCT_SIGNALS)
+    is_person = _contains_signal(q, _PERSON_SIGNALS)
+    has_location = _has_location_phrase(q)
 
-    local_signals = any(token in q for token in _FAMILY_KEYWORDS["local_business"])
-    has_location_phrase = any(marker in q for marker in (" in ", " near ", " around "))
-    if local_signals or has_location_phrase:
-        return "local_business"
+    # Software wins over a stray "platform/tool" being read as org.
+    if is_software and not is_org:
+        return "software_project"
 
-    if any(token in q for token in _FAMILY_KEYWORDS["product_category"]):
-        return "product_category"
-    if any(token in q for token in _FAMILY_KEYWORDS["organization"]):
-        return "organization"
-    return "fallback_generic"
+    # Person signals are rarer but strong when present.
+    if is_person and not (is_org or is_software):
+        return "person_group"
+
+    # A concrete venue noun plus a location phrase is a strong place signal.
+    if is_place and (has_location or not is_org):
+        return "place_venue"
+
+    # Organizational signals → organization_company.
+    if is_org:
+        return "organization_company"
+
+    # Software without an overriding org signal.
+    if is_software:
+        return "software_project"
+
+    # Product signals.
+    if is_product:
+        return "product_offering"
+
+    # A location phrase alone still hints at a place_venue query.
+    if has_location:
+        return "place_venue"
+
+    return "generic_entity_list"
+
+
+# ── Entity-type derivation ────────────────────────────────────────────────────
+
+_INTENT_PREFIX_RE = re.compile(
+    r"^(top|best|leading|most\s+promising|highest\s+rated|top\s+rated|"
+    r"popular|great|notable|recommended|must[- ]?visit)\s+",
+    flags=re.IGNORECASE,
+)
+
+_TRAILING_LOCATION_RE = re.compile(
+    r"\s+(in|near|around|at|from)\s+.+$",
+    flags=re.IGNORECASE,
+)
+
+_YEAR_SUFFIX_RE = re.compile(r"\s+(?:in\s+)?(?:19|20)\d{2}s?\s*$", flags=re.IGNORECASE)
 
 
 def _strip_leading_intent(query: str) -> str:
-    q = query.strip()
-    return re.sub(
-        r"^(top|best|leading|most promising|highest rated|top rated)\s+",
-        "",
-        q,
-        flags=re.IGNORECASE,
-    )
+    return _INTENT_PREFIX_RE.sub("", query.strip())
 
 
 def _derive_entity_type(query: str, family: str) -> str:
-    q = query.lower()
-    if family == "local_business":
-        if "pizza" in q:
-            return "pizza place"
-        if "ramen" in q:
-            return "ramen shop"
-        if "coffee" in q or "roaster" in q:
-            return "coffee roaster"
-        if "hostel" in q:
-            return "hostel"
-        if "trail" in q:
-            return "trail"
-        if "restaurant" in q:
-            return "restaurant"
-        return "local business"
-    if family == "startup_company":
-        return "startup"
-    if family == "software_tool":
-        if "database" in q:
-            return "database"
-        if "app" in q or "apps" in q:
-            return "software app"
-        return "software tool"
-    if family == "product_category":
-        if "brand" in q or "brands" in q:
-            return "brand"
-        return "product"
-    if family == "organization":
-        if "company" in q or "companies" in q:
-            return "company"
-        if "university" in q or "universities" in q:
-            return "university"
-        if "hospital" in q or "hospitals" in q:
-            return "hospital"
-        return "organization"
-    return "entity"
+    """Derive a short entity-type noun from the query topic.
+
+    Extract the core noun phrase by stripping intent prefixes ("top", "best"),
+    trailing location clauses, and year suffixes. Fall back to the family
+    default if nothing usable remains.
+    """
+    topic = _strip_leading_intent(query)
+    topic = _YEAR_SUFFIX_RE.sub("", topic)
+    topic = _TRAILING_LOCATION_RE.sub("", topic).strip()
+
+    # Pick the last 1–3 meaningful tokens as the entity phrase.
+    tokens = [t for t in re.split(r"\s+", topic) if t]
+    if not tokens:
+        return _SCHEMA_TEMPLATES[family].entity_type
+
+    phrase = " ".join(tokens[-3:]) if len(tokens) >= 3 else " ".join(tokens)
+    phrase = phrase.strip().lower()
+    if not phrase or phrase in _GENERIC_ENTITY_TYPES:
+        return _SCHEMA_TEMPLATES[family].entity_type
+
+    # Singularize trivially: drop trailing 's' from last word if it's plural-like.
+    parts = phrase.split()
+    last = parts[-1]
+    if len(last) > 3 and last.endswith("s") and not last.endswith("ss"):
+        parts[-1] = last[:-1]
+    return " ".join(parts) or _SCHEMA_TEMPLATES[family].entity_type
 
 
 def _template_for_query(query: str, family: str | None = None) -> _SchemaTemplate:
@@ -212,174 +328,76 @@ def _template_for_query(query: str, family: str | None = None) -> _SchemaTemplat
     )
 
 
+# ── Deterministic facets (structural, not example-specific) ───────────────────
+
 def _deterministic_facets(
     query: str,
     query_family: str,
     columns: list[str],
 ) -> list[SearchFacet]:
-    topic = _strip_leading_intent(query)
-    base = topic or query
+    """Produce a general facet set parametrized by entity-kind family.
 
-    if query_family == "local_business":
-        return [
-            SearchFacet(
-                type="entity_list",
-                query=f"best {base}",
-                expected_fill_columns=["name", "address", "rating"],
-                rationale="list pages maximize candidate recall for local places",
-            ),
-            SearchFacet(
-                type="official_source",
-                query=f"{base} official website",
-                expected_fill_columns=["website", "address", "phone_number"],
-                rationale="official sites are best for canonical contact details",
-            ),
-            SearchFacet(
-                type="editorial_review",
-                query=f"{base} reviews",
-                expected_fill_columns=["name", "category", "rating"],
-                rationale="editorial roundups provide ranked candidate lists",
-            ),
-            SearchFacet(
-                type="attribute_specific",
-                query=f"{base} phone number address",
-                expected_fill_columns=["address", "phone_number"],
-                rationale="contact-focused pages fill actionable local fields",
-            ),
-        ]
+    Facets express retrieval intent (list, official, editorial, attribute,
+    news, comparison) rather than vertical-specific phrasing.
+    """
+    topic = _strip_leading_intent(query) or query
+    fill = [c for c in columns if c != "name"][:3]
 
-    if query_family == "startup_company":
-        return [
-            SearchFacet(
-                type="entity_list",
-                query=f"top {base}",
-                expected_fill_columns=["name", "website", "focus_area"],
-                rationale="roundup lists surface many startup candidates quickly",
-            ),
-            SearchFacet(
-                type="official_source",
-                query=f"{base} official website",
-                expected_fill_columns=["website", "headquarters", "product_or_service"],
-                rationale="official sites are strongest for core company facts",
-            ),
-            SearchFacet(
-                type="editorial_review",
-                query=f"{base} company profile",
-                expected_fill_columns=["name", "focus_area", "product_or_service"],
-                rationale="profiles explain what each company does",
-            ),
-            SearchFacet(
-                type="news_recent",
-                query=f"{base} funding announcement",
-                expected_fill_columns=["funding_stage", "name"],
-                rationale="recent funding news often states company stage clearly",
-            ),
-        ]
-
-    if query_family == "software_tool":
-        return [
-            SearchFacet(
-                type="entity_list",
-                query=f"best {base}",
-                expected_fill_columns=["name", "website", "primary_use_case"],
-                rationale="comparison pages are high-recall sources for tool candidates",
-            ),
-            SearchFacet(
-                type="official_source",
-                query=f"{base} official documentation",
-                expected_fill_columns=["website", "primary_use_case", "language"],
-                rationale="official docs are best for canonical product facts",
-            ),
-            SearchFacet(
-                type="comparison",
-                query=f"{base} comparison",
-                expected_fill_columns=["name", "primary_use_case", "license"],
-                rationale="comparison pages differentiate similar tools clearly",
-            ),
-            SearchFacet(
-                type="attribute_specific",
-                query=f"{base} github license",
-                expected_fill_columns=["github_repo", "license", "language"],
-                rationale="repo and license pages fill actionable software fields",
-            ),
-        ]
-
-    if query_family == "organization":
-        return [
-            SearchFacet(
-                type="entity_list",
-                query=f"leading {base}",
-                expected_fill_columns=["name", "website", "focus_area"],
-                rationale="industry lists surface many organizations quickly",
-            ),
-            SearchFacet(
-                type="official_source",
-                query=f"{base} official website",
-                expected_fill_columns=["website", "location", "leadership"],
-                rationale="official pages provide canonical organization details",
-            ),
-            SearchFacet(
-                type="editorial_review",
-                query=f"{base} profile",
-                expected_fill_columns=["name", "focus_area", "organization_type"],
-                rationale="profiles help distinguish similar organizations",
-            ),
-            SearchFacet(
-                type="news_recent",
-                query=f"{base} announcement",
-                expected_fill_columns=["name", "focus_area"],
-                rationale="news helps surface recently active organizations",
-            ),
-        ]
-
-    if query_family == "product_category":
-        return [
-            SearchFacet(
-                type="entity_list",
-                query=f"best {base}",
-                expected_fill_columns=["name", "category", "key_feature"],
-                rationale="ranked lists maximize candidate recall for products",
-            ),
-            SearchFacet(
-                type="official_source",
-                query=f"{base} official website",
-                expected_fill_columns=["website", "availability", "price_range"],
-                rationale="official sites best capture canonical purchase info",
-            ),
-            SearchFacet(
-                type="comparison",
-                query=f"{base} comparison",
-                expected_fill_columns=["name", "key_feature", "price_range"],
-                rationale="comparison pages help differentiate similar products",
-            ),
-            SearchFacet(
-                type="attribute_specific",
-                query=f"{base} price features",
-                expected_fill_columns=["price_range", "key_feature"],
-                rationale="attribute-focused pages improve fill rate for product fields",
-            ),
-        ]
-
-    return [
+    facets: list[SearchFacet] = [
         SearchFacet(
             type="entity_list",
-            query=f"top {base}",
-            expected_fill_columns=["name", "website"],
-            rationale="broad list pages surface candidate entities",
+            query=f"top {topic}",
+            expected_fill_columns=["name"] + fill[:2],
+            rationale="list/roundup pages maximize candidate recall",
         ),
         SearchFacet(
             type="official_source",
-            query=f"{base} official website",
-            expected_fill_columns=["website", "location"],
-            rationale="official pages ground canonical entity facts",
+            query=f"{topic} official website",
+            expected_fill_columns=[c for c in columns if c in {"website", "website_or_repo", "website_or_profile"}][:1] or ["name"],
+            rationale="official/home pages give canonical entity facts",
         ),
         SearchFacet(
             type="editorial_review",
-            query=f"{base} review",
-            expected_fill_columns=["name", "category"],
-            rationale="editorial pages provide cleaner candidate lists than raw search",
+            query=f"{topic} overview",
+            expected_fill_columns=["name"] + fill[:1],
+            rationale="editorial overviews separate candidates from noise",
         ),
     ]
+
+    # Family-level attribute facet — parametrized, not hardcoded phrasing.
+    attribute_fill = [c for c in columns if c not in {"name", "website", "website_or_repo", "website_or_profile"}][:2]
+    if attribute_fill:
+        attribute_hint = attribute_fill[0].replace("_", " ")
+        facets.append(
+            SearchFacet(
+                type="attribute_specific",
+                query=f"{topic} {attribute_hint}",
+                expected_fill_columns=attribute_fill,
+                rationale=f"attribute-focused pages fill the {attribute_hint} column",
+            )
+        )
+
+    # Comparison facet for software/product; news facet for orgs; none otherwise.
+    if query_family in {"software_project", "product_offering"}:
+        facets.append(
+            SearchFacet(
+                type="comparison",
+                query=f"{topic} comparison",
+                expected_fill_columns=["name"] + fill[:1],
+                rationale="comparison pages differentiate similar candidates",
+            )
+        )
+    elif query_family == "organization_company":
+        facets.append(
+            SearchFacet(
+                type="news_recent",
+                query=f"{topic} news",
+                expected_fill_columns=["name"] + fill[:1],
+                rationale="recent news surfaces active candidates",
+            )
+        )
+
+    return facets[:5]
 
 
 def _fallback_plan(query: str, family: str | None = None) -> PlannerOutput:
@@ -395,7 +413,11 @@ def _fallback_plan(query: str, family: str | None = None) -> PlannerOutput:
     )
 
 
-async def _llm_facets(query: str, template: _SchemaTemplate) -> _FacetPlan:
+async def _llm_facets(
+    query: str,
+    template: _SchemaTemplate,
+    stats: dict[str, int] | None = None,
+) -> _FacetPlan:
     settings = get_settings()
     return await chat_json_validated(
         _SYSTEM,
@@ -409,6 +431,7 @@ async def _llm_facets(query: str, template: _SchemaTemplate) -> _FacetPlan:
         temperature=0.2,
         max_tokens=640,
         provider=settings.planner_provider,
+        usage_stats=stats,
     )
 
 
@@ -441,14 +464,14 @@ def _choose_entity_type(llm_entity_type: str, template_entity_type: str) -> str:
     return llm_entity_type.strip()
 
 
-async def plan_schema(query: str) -> PlannerOutput:
+async def plan_schema(query: str, stats: dict[str, int] | None = None) -> PlannerOutput:
     """Return a stable, family-constrained schema plan for the given query."""
     family = classify_query_family(query)
     template = _template_for_query(query, family)
     log.info("Planning schema for query=%r family=%s", query, family)
 
     try:
-        llm_result = await _llm_facets(query, template)
+        llm_result = await _llm_facets(query, template, stats=stats)
         facets = _sanitize_facets(llm_result.facets, template.columns)[:5]
         entity_type = _choose_entity_type(llm_result.entity_type, template.entity_type)
         result = PlannerOutput(

@@ -17,11 +17,15 @@ from __future__ import annotations
 import re
 from urllib.parse import urlparse, urlunparse
 
-from app.services.source_quality import classify_source
+from app.services.source_quality import classify_source, is_curated_third_party
 from app.utils.url import extract_domain
 
-# Column name sets
-_WEBSITE_COLS = {"website", "url", "official_website", "homepage", "link"}
+# Column name sets — driven by field semantics, not domain.
+# Structural columns that typically hold an entity's canonical URL.
+_WEBSITE_COLS = {
+    "website", "url", "official_website", "homepage", "link",
+    "website_or_repo", "website_or_profile", "site",
+}
 _PHONE_COLS = {"phone", "phone_number", "telephone", "contact_phone"}
 _RATING_COLS = {"rating", "score", "stars"}
 
@@ -67,21 +71,11 @@ _DIRECTORY_SEGMENTS = {
     "lists",
     "marketplace",
 }
-_HOMEPAGE_HINT_SEGMENTS = {
-    "about",
-    "company",
-    "contact",
-    "contacts",
-    "home",
-    "hours",
-    "location",
-    "locations",
-    "menu",
-    "team",
-    "visit",
-}
+# Retained only for structural hint detection — path-segment shape is the
+# primary signal (see _should_canonicalize_to_homepage).
+_HOMEPAGE_HINT_SEGMENTS: set[str] = set()
 _ARTICLE_TITLE_HINTS = ("blog", "news", "report", "review", "guide", "top ", "best ")
-_DIRECTORY_TITLE_HINTS = ("category", "directory", "industry", "companies", "list", "find top startups")
+_DIRECTORY_TITLE_HINTS = ("category", "directory", "industry", "list")
 
 
 def _homepage_url(parsed) -> str:
@@ -104,19 +98,39 @@ def _looks_like_article_page(parsed, title: str | None = None) -> bool:
     return any(hint in title_l for hint in _ARTICLE_TITLE_HINTS)
 
 
+_DIRECTORY_QUERY_PARAMS = (
+    "category=", "categories=", "industry=", "industries=",
+    "tag=", "tags=", "type=", "collection=",
+)
+
+
 def _looks_like_directory_page(parsed, title: str | None = None) -> bool:
     segments = _path_segments(parsed)
     title_l = (title or "").lower()
+    query_l = parsed.query.lower()
     if any(seg in _DIRECTORY_SEGMENTS for seg in segments):
+        return True
+    if any(param in query_l for param in _DIRECTORY_QUERY_PARAMS):
         return True
     return any(hint in title_l for hint in _DIRECTORY_TITLE_HINTS)
 
 
 def _should_canonicalize_to_homepage(parsed) -> bool:
+    """Structural heuristic: a short single path segment (no dashes, not dated)
+    is almost always a "hub" page on the entity's own site (about, contact,
+    menu, docs, home, team, overview, …). Collapsing to the homepage gives
+    the most stable canonical representation of the entity.
+
+    This rule works across verticals because it relies on URL shape, not a
+    vertical-specific wordlist.
+    """
     segments = _path_segments(parsed)
-    if not segments:
+    if not segments or len(segments) > 1:
         return False
-    return any(seg in _HOMEPAGE_HINT_SEGMENTS for seg in segments)
+    seg = segments[0]
+    # Short (<=20 chars), no dashes, no digits — this rules out dated
+    # slugs and article-style permalinks.
+    return "-" not in seg and not any(ch.isdigit() for ch in seg) and 2 <= len(seg) <= 20
 
 
 def _canonical_url_for_domain(canonical_domain: str | None) -> str | None:
@@ -180,17 +194,18 @@ def normalize_website(
         if not candidate_domain:
             return value, False
 
-        official_url = _canonical_url_for_domain(canonical_domain)
-        candidate_kind, _ = classify_source(normalized, None, official_url)
-        if candidate_kind in {"editorial", "directory", "marketplace"}:
+        # Hard-reject only when the candidate URL is on a curated third-party
+        # domain. Shape-based editorial/directory signals are handled below
+        # by collapsing to homepage (an entity's own blog post should
+        # canonicalize to its homepage, not be rejected entirely).
+        if is_curated_third_party(candidate_domain):
             return value, False
 
         source_domain = extract_domain(source_url) if source_url else None
         if source_url:
-            source_kind, _ = classify_source(source_url, source_title, official_url)
             source_parsed = urlparse(source_url)
             same_domain = source_domain == candidate_domain
-            if same_domain and source_kind in {"editorial", "directory", "marketplace"}:
+            if same_domain and is_curated_third_party(source_domain or ""):
                 return value, False
             if same_domain and _looks_like_directory_page(source_parsed, source_title):
                 return value, False

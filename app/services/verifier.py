@@ -39,9 +39,12 @@ _PSEUDO_ENTITY_TERMS = {
     "tools",
 }
 _PSEUDO_ENTITY_FAMILY_TERMS = {
-    "local_business": {"bars", "cafes", "coffee shops", "pizza places", "restaurants"},
-    "software_tool": {"apps", "platforms", "tools"},
-    "startup_company": {"agents", "copilots", "companies", "platforms", "startups", "tools"},
+    "organization_company": {"companies", "firms", "organizations", "providers", "services", "solutions", "startups"},
+    "place_venue": {"bars", "cafes", "destinations", "places", "restaurants", "shops", "venues"},
+    "software_project": {"apps", "frameworks", "libraries", "platforms", "projects", "repositories", "tools"},
+    "product_offering": {"brands", "devices", "items", "offerings", "products"},
+    "person_group": {"authors", "experts", "people", "researchers", "speakers"},
+    "generic_entity_list": {"entities", "items", "things"},
 }
 _PSEUDO_ENTITY_CONNECTORS = (" for ", " in ", " & ", "/")
 _PSEUDO_SOURCE_PATH_HINTS = (
@@ -71,7 +74,7 @@ def _query_is_strict(query: str) -> bool:
 
 
 def _count_actionable_fields(row: EntityRow) -> int:
-    return len([col for col in row.cells if col not in {"name", "cuisine_type", "category", "description", "overview", "summary", "type"}])
+    return len([col for col in row.cells if col not in {"name", "category", "description", "overview", "summary", "type"}])
 
 
 def _looks_like_pseudo_entity_name(name: str, plan: PlannerOutput) -> bool:

@@ -34,12 +34,12 @@ _CANONICAL_FACET_TYPES = {
 }
 
 _CANONICAL_QUERY_FAMILIES = {
-    "local_business",
-    "startup_company",
-    "software_tool",
-    "product_category",
-    "organization",
-    "fallback_generic",
+    "organization_company",
+    "place_venue",
+    "software_project",
+    "product_offering",
+    "person_group",
+    "generic_entity_list",
 }
 
 
@@ -58,7 +58,7 @@ class SearchFacet(BaseModel):
 
 
 class PlannerOutput(BaseModel):
-    query_family: str = "fallback_generic"
+    query_family: str = "generic_entity_list"
     entity_type: str
     columns: List[str]                 # always starts with "name"; max 8
     search_angles: List[str] = Field(default_factory=list)  # derived from facets post-validation
@@ -68,7 +68,7 @@ class PlannerOutput(BaseModel):
     @classmethod
     def _normalize_query_family(cls, v: str) -> str:
         v = (v or "").strip().lower().replace("-", "_").replace(" ", "_")
-        return v if v in _CANONICAL_QUERY_FAMILIES else "fallback_generic"
+        return v if v in _CANONICAL_QUERY_FAMILIES else "generic_entity_list"
 
 
 # ── Brave search ───────────────────────────────────────────────────────────────
@@ -86,6 +86,11 @@ class ScrapedPage(BaseModel):
     title: str
     cleaned_text: str
     from_cache: bool = False
+    raw_html: Optional[str] = None
+    page_metadata: Dict[str, Any] = Field(default_factory=dict)
+    evidence_regime: str = "unknown"
+    regime_confidence: float = 0.0
+    fetch_method: str = "static"
 
 
 # ── Extractor (per-page, pre-merge) ───────────────────────────────────────────
@@ -144,6 +149,7 @@ class SearchMetadata(BaseModel):
     gap_fill_used: bool
     duration_seconds: float
     pipeline_counts: Dict[str, int] = Field(default_factory=dict)
+    pipeline_timings_ms: Dict[str, float] = Field(default_factory=dict)
 
 
 class SearchResponse(BaseModel):

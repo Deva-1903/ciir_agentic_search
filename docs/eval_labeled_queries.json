@@ -1,0 +1,113 @@
+[
+  {
+    "id": "labeled-modern-art-museums-mexico-city",
+    "query": "best modern art museums in Mexico City",
+    "category": "places",
+    "notes": "Small labeled place query for entity and citation checking.",
+    "expected_entities": [
+      {
+        "name": "Museo Jumex",
+        "aliases": ["Jumex Museum"],
+        "key_fields": {
+          "website": ["fundacionjumex.org"],
+          "location": ["Mexico City"]
+        }
+      },
+      {
+        "name": "Museo Tamayo",
+        "aliases": ["Tamayo Museum"],
+        "key_fields": {
+          "website": ["museotamayo.org"],
+          "location": ["Mexico City"]
+        }
+      },
+      {
+        "name": "Museo de Arte Moderno",
+        "aliases": ["Museum of Modern Art Mexico City"],
+        "key_fields": {
+          "location": ["Mexico City"]
+        }
+      }
+    ]
+  },
+  {
+    "id": "labeled-open-source-observability",
+    "query": "top open source observability platforms",
+    "category": "software",
+    "notes": "Repo/docs-heavy labeled query.",
+    "expected_entities": [
+      {
+        "name": "Prometheus",
+        "key_fields": {
+          "website_or_repo": ["github.com/prometheus/prometheus"],
+          "license": ["Apache"]
+        }
+      },
+      {
+        "name": "Grafana",
+        "key_fields": {
+          "website_or_repo": ["grafana.com", "github.com/grafana/grafana"]
+        }
+      },
+      {
+        "name": "Jaeger",
+        "key_fields": {
+          "website_or_repo": ["jaegertracing.io", "github.com/jaegertracing/jaeger"]
+        }
+      }
+    ]
+  },
+  {
+    "id": "labeled-vector-databases",
+    "query": "open source vector databases for production use",
+    "category": "software",
+    "notes": "Labeled software comparison query.",
+    "expected_entities": [
+      {
+        "name": "Qdrant",
+        "key_fields": {
+          "website_or_repo": ["qdrant.tech", "github.com/qdrant/qdrant"]
+        }
+      },
+      {
+        "name": "Milvus",
+        "key_fields": {
+          "website_or_repo": ["milvus.io", "github.com/milvus-io/milvus"]
+        }
+      },
+      {
+        "name": "Weaviate",
+        "key_fields": {
+          "website_or_repo": ["weaviate.io", "github.com/weaviate/weaviate"]
+        }
+      }
+    ]
+  },
+  {
+    "id": "labeled-cybersecurity-companies",
+    "query": "leading cybersecurity companies in the United States",
+    "category": "organizations",
+    "notes": "Labeled company query with official-site expectations.",
+    "expected_entities": [
+      {
+        "name": "CrowdStrike",
+        "key_fields": {
+          "website": ["crowdstrike.com"],
+          "headquarters": ["United States"]
+        }
+      },
+      {
+        "name": "Palo Alto Networks",
+        "key_fields": {
+          "website": ["paloaltonetworks.com"]
+        }
+      },
+      {
+        "name": "SentinelOne",
+        "key_fields": {
+          "website": ["sentinelone.com"]
+        }
+      }
+    ]
+  }
+]

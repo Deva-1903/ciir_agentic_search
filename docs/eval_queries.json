@@ -1,62 +1,74 @@
 [
   {
-    "id": "food-pizza-brooklyn",
-    "query": "best pizza restaurants in Brooklyn, New York",
-    "category": "food",
-    "notes": "Classic local-business query. Expect name, address, phone, website, rating."
+    "id": "places-modern-art-museums-mexico-city",
+    "query": "best modern art museums in Mexico City",
+    "category": "places",
+    "notes": "Physical place query with strong geographic fit and official-site expectations."
   },
   {
-    "id": "food-ramen-la",
-    "query": "top ramen shops in Los Angeles",
-    "category": "food",
-    "notes": "Niche cuisine, fewer editorial sources. Tests extraction breadth."
+    "id": "places-hiking-seattle",
+    "query": "top hiking trails near Seattle, Washington",
+    "category": "places",
+    "notes": "Place query without a commercial-business bias; useful for local-fit ranking."
   },
   {
-    "id": "food-coffee-seattle",
-    "query": "best specialty coffee roasters in Seattle",
-    "category": "food",
-    "notes": "Mix of chains and independents. Good for source diversity signal."
+    "id": "places-coworking-austin",
+    "query": "coworking spaces in Austin, Texas",
+    "category": "places",
+    "notes": "Mixture of official sites, directories, and listing pages."
   },
   {
-    "id": "tech-ai-startups",
-    "query": "most promising AI startups founded in 2024",
-    "category": "tech",
-    "notes": "Startup/tech domain. Expect name, founded, funding, website, description."
+    "id": "software-observability-platforms",
+    "query": "top open source observability platforms",
+    "category": "software",
+    "notes": "Software query that should benefit from repo/docs evidence regimes."
   },
   {
-    "id": "tech-devtools-2025",
-    "query": "best developer tools and productivity apps in 2025",
-    "category": "tech",
-    "notes": "Broad tech query. Tests planner facet quality on editorial-heavy results."
+    "id": "software-vector-databases",
+    "query": "open source vector databases for production use",
+    "category": "software",
+    "notes": "Discovery-heavy software comparison query with repo and docs evidence."
   },
   {
-    "id": "tech-cybersecurity-companies",
+    "id": "software-api-docs-tools",
+    "query": "best API documentation tools for engineering teams",
+    "category": "software",
+    "notes": "Broader tooling query that mixes product and software-project evidence."
+  },
+  {
+    "id": "organizations-climate-nonprofits",
+    "query": "leading climate nonprofits in Europe",
+    "category": "organizations",
+    "notes": "Organization query that should rely on official sites and editorial support."
+  },
+  {
+    "id": "organizations-cybersecurity-companies",
     "query": "leading cybersecurity companies in the United States",
-    "category": "tech",
-    "notes": "Enterprise domain. Mix of official sources and analyst reports."
+    "category": "organizations",
+    "notes": "Company query with strong official-source and headquarters signals."
   },
   {
-    "id": "travel-budget-europe",
-    "query": "best budget-friendly hostels in Lisbon, Portugal",
-    "category": "travel",
-    "notes": "Travel/hospitality domain. Tests extraction from booking-style pages."
+    "id": "organizations-digital-preservation",
+    "query": "digital preservation organizations for research data",
+    "category": "organizations",
+    "notes": "Organization/institution query with academic-ish source mix."
   },
   {
-    "id": "travel-hiking-colorado",
-    "query": "top rated hiking trails near Denver, Colorado",
-    "category": "travel",
-    "notes": "Outdoor/recreation. Non-business entities; tests schema flexibility."
+    "id": "people-ai-safety-researchers",
+    "query": "notable AI safety researchers",
+    "category": "people",
+    "notes": "Person-group query to test affiliation and profile extraction."
   },
   {
-    "id": "food-vegan-london",
-    "query": "best vegan restaurants in London",
-    "category": "food",
-    "notes": "International query. Tests Brave API coverage outside the US."
+    "id": "products-standing-desk-brands",
+    "query": "best ergonomic standing desk brands",
+    "category": "products",
+    "notes": "Product/brand query with review, official, and marketplace evidence."
   },
   {
-    "id": "tech-open-source-databases",
-    "query": "top open source databases for production use in 2025",
-    "category": "tech",
-    "notes": "Software comparison query. Tests comparison facet type selection."
+    "id": "products-keyboard-brands",
+    "query": "popular mechanical keyboard brands for developers",
+    "category": "products",
+    "notes": "Product/brand query with broad third-party coverage and mixed evidence quality."
   }
 ]

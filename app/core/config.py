@@ -43,6 +43,9 @@ class Settings(BaseSettings):
     extract_llm_timeout_seconds: float = 30.0
     extract_llm_max_attempts: int = 1
     cache_ttl_hours: int = 24
+    js_rendering_enabled: bool = False
+    js_render_max_pages: int = 2
+    js_render_timeout: int = 12
 
     # Gap-fill bounds
     gap_fill_max_entities: int = 5

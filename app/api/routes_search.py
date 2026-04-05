@@ -48,6 +48,7 @@ router = APIRouter()
 async def _run_pipeline(job_id: str, query: str) -> None:
     """Full end-to-end pipeline, runs as a background task."""
     t0 = time.monotonic()
+    stage_timings_ms: dict[str, float] = {}
     log.info("=== Pipeline START  job=%s  query=%r ===", job_id, query)
 
     async def _phase(name: str) -> None:
@@ -58,10 +59,15 @@ async def _run_pipeline(job_id: str, query: str) -> None:
     try:
         normalized = normalize_query(query)
         retrieval_query = normalized.normalized_query or query
+        planner_stats: dict[str, int] = {}
+        scrape_stats: dict[str, int] = {}
+        extraction_stats: dict[str, int] = {}
 
         # 1. Plan schema
         await _phase("planning")
-        plan: PlannerOutput = await plan_schema(retrieval_query)
+        stage_start = time.monotonic()
+        plan: PlannerOutput = await plan_schema(retrieval_query, stats=planner_stats)
+        stage_timings_ms["planning"] = round((time.monotonic() - stage_start) * 1000, 1)
         pipeline_counts: dict[str, int] = {
             "search_angles": len(plan.search_angles),
             "search_facets": len(plan.facets),
@@ -77,14 +83,18 @@ async def _run_pipeline(job_id: str, query: str) -> None:
 
         # 2. Search
         await _phase("searching")
+        stage_start = time.monotonic()
         brave_results = await run_brave_search(plan.search_angles)
+        stage_timings_ms["searching"] = round((time.monotonic() - stage_start) * 1000, 1)
         urls_considered = len(brave_results)
         pipeline_counts["urls_after_dedupe"] = urls_considered
         log.info("Search: %d URLs to scrape", urls_considered)
 
         # 3. Scrape
         await _phase("scraping")
-        scraped_pages = await scrape_pages(brave_results)
+        stage_start = time.monotonic()
+        scraped_pages = await scrape_pages(brave_results, stats=scrape_stats)
+        stage_timings_ms["scraping"] = round((time.monotonic() - stage_start) * 1000, 1)
         pages_scraped = len(scraped_pages)
         pipeline_counts["pages_scraped"] = pages_scraped
         log.info("Scrape: %d/%d pages OK", pages_scraped, urls_considered)
@@ -98,11 +108,13 @@ async def _run_pipeline(job_id: str, query: str) -> None:
         rerank_info: dict = {"scorer": None, "pages_after": pages_scraped}
         if settings.rerank_enabled and pages_scraped > settings.rerank_top_k:
             await _phase("reranking")
+            stage_start = time.monotonic()
             pages_for_discovery, rerank_info = await rerank_pages(
                 retrieval_query,
                 scraped_pages,
                 settings.rerank_top_k,
             )
+            stage_timings_ms["reranking"] = round((time.monotonic() - stage_start) * 1000, 1)
         else:
             rerank_info = {"scorer": None, "pages_after": pages_scraped}
         pipeline_counts["pages_after_rerank"] = len(pages_for_discovery)
@@ -115,7 +127,7 @@ async def _run_pipeline(job_id: str, query: str) -> None:
             len(pages_for_discovery),
             discovery_plan.columns,
         )
-        extraction_stats: dict[str, int] = {}
+        stage_start = time.monotonic()
         drafts = await extract_from_pages(
             retrieval_query,
             discovery_plan,
@@ -123,6 +135,7 @@ async def _run_pipeline(job_id: str, query: str) -> None:
             mode="discovery",
             stats=extraction_stats,
         )
+        stage_timings_ms["extracting"] = round((time.monotonic() - stage_start) * 1000, 1)
         entities_extracted = len(drafts)
         pipeline_counts["extraction_calls"] = extraction_stats.get("llm_calls_attempted", 0)
         pipeline_counts["chunks_extracted"] = extraction_stats.get("chunks_seen", 0)
@@ -131,6 +144,10 @@ async def _run_pipeline(job_id: str, query: str) -> None:
         pipeline_counts["provider_fallback_attempts"] = extraction_stats.get("provider_fallback_attempts", 0)
         pipeline_counts["provider_fallback_successes"] = extraction_stats.get("provider_fallback_successes", 0)
         pipeline_counts["entities_before_merge"] = entities_extracted
+        pipeline_counts["pages_routed_deterministic"] = extraction_stats.get("pages_routed_deterministic", 0)
+        pipeline_counts["pages_routed_hybrid"] = extraction_stats.get("pages_routed_hybrid", 0)
+        pipeline_counts["pages_routed_llm"] = extraction_stats.get("pages_routed_llm", 0)
+        pipeline_counts["deterministic_entities"] = extraction_stats.get("deterministic_entities", 0)
         log.info("Candidate discovery done: %d extracted candidates", entities_extracted)
 
         if entities_extracted == 0 and len(pages_for_discovery) >= 3:
@@ -145,6 +162,7 @@ async def _run_pipeline(job_id: str, query: str) -> None:
 
         # 5. Merge candidate rows
         await _phase("merging")
+        stage_start = time.monotonic()
         rows = merge_entities(drafts, plan)
         rows_after_merge = len(rows)
         pipeline_counts["rows_after_merge"] = rows_after_merge
@@ -152,33 +170,57 @@ async def _run_pipeline(job_id: str, query: str) -> None:
         pipeline_counts["rows_after_initial_prune"] = rows_after_merge
 
         rows, official_sites_resolved = resolve_official_sites(rows, scraped_pages)
+        stage_timings_ms["merging"] = round((time.monotonic() - stage_start) * 1000, 1)
         pipeline_counts["official_sites_resolved"] = official_sites_resolved
         pipeline_counts["candidate_rows"] = len(rows)
         log.info("Merge done: %d canonical candidate rows", rows_after_merge)
 
         # 6. Rank candidates before filling
         log.info("Ranking candidate rows…")
-        rows = rank_rows(rows, plan)
+        rows = rank_rows(rows, plan, retrieval_query)
 
         # 7. Focused attribute filling
         await _phase("gap_filling")
-        rows, gap_fill_used = await run_gap_fill(rows, plan, retrieval_query)
+        stage_start = time.monotonic()
+        rows, gap_fill_used = await run_gap_fill(rows, plan, retrieval_query, stats=extraction_stats)
+        stage_timings_ms["gap_filling"] = round((time.monotonic() - stage_start) * 1000, 1)
         pipeline_counts["rows_after_gap_fill"] = len(rows)
         log.info("Gap-fill done: used=%s", gap_fill_used)
         # Cell verification runs after filling so we do not penalize discovery-only rows too early.
         if settings.cell_verifier_enabled:
             rows = verify_rows_cells(rows)
 
-        rows = rank_rows(rows, plan)
+        rows = rank_rows(rows, plan, retrieval_query)
 
         await _phase("verifying")
+        stage_start = time.monotonic()
         rows = verify_rows(rows, plan, query)
+        stage_timings_ms["verifying"] = round((time.monotonic() - stage_start) * 1000, 1)
         pipeline_counts["rows_after_verifier"] = len(rows)
 
         rows = prune_rows(rows, plan)
         pipeline_counts["rows_after_final_prune"] = len(rows)
-        rows = rank_rows(rows, plan)
+        rows = rank_rows(rows, plan, retrieval_query)
         pipeline_counts["final_rows"] = len(rows)
+        pipeline_counts["planner_llm_calls"] = planner_stats.get("llm_calls", 0)
+        pipeline_counts["planner_llm_tokens"] = planner_stats.get("llm_total_tokens", 0)
+        pipeline_counts["llm_calls_total"] = planner_stats.get("llm_calls", 0) + extraction_stats.get("llm_calls_attempted", 0)
+        pipeline_counts["llm_tokens_total"] = planner_stats.get("llm_total_tokens", 0) + extraction_stats.get("llm_total_tokens", 0)
+
+        for key, value in scrape_stats.items():
+            pipeline_counts[key] = value
+        for key in (
+            "deterministic_pages_with_entities",
+            "deterministic_entities",
+            "pages_routed_deterministic",
+            "pages_routed_hybrid",
+            "pages_routed_llm",
+            "llm_prompt_tokens",
+            "llm_completion_tokens",
+            "llm_total_tokens",
+        ):
+            if key in extraction_stats:
+                pipeline_counts[key] = extraction_stats[key]
 
         if entities_extracted > 0 and not rows:
             log.warning(
@@ -209,6 +251,7 @@ async def _run_pipeline(job_id: str, query: str) -> None:
                 gap_fill_used=gap_fill_used,
                 duration_seconds=duration,
                 pipeline_counts=pipeline_counts,
+                pipeline_timings_ms=stage_timings_ms,
             ),
         )
 
