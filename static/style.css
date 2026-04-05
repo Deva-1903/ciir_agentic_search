@@ -557,6 +557,7 @@ details[open] > .panel__header {
   border-bottom: 1px solid var(--border);
   vertical-align: top;
   max-width: 220px;
+  min-width: 140px;
 }
 .results-table tr:last-child td {
   border-bottom: none;
@@ -573,11 +574,12 @@ details[open] > .panel__header {
   color: var(--accent);
 }
 .cell-value {
-  display: inline;
+  display: inline-block;
+  vertical-align: middle;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 200px;
+  max-width: 90%;
   transition: color 0.15s;
 }
 .cell-empty {

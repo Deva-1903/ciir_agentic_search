@@ -91,6 +91,14 @@ async def _run_pipeline(job_id: str, query: str) -> None:
         entities_extracted = len(drafts)
         log.info("Extraction done: %d candidate entities", entities_extracted)
 
+        if entities_extracted == 0 and len(pages) >= 3:
+            log.error(
+                "Extraction returned 0 entities from %d pages — this likely "
+                "indicates a systemic failure (model misconfiguration, API error, "
+                "or prompt incompatibility). Check LLM logs above for errors.",
+                len(pages),
+            )
+
         # 5. Merge
         await _phase("merging")
         rows = merge_entities(drafts, plan)

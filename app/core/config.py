@@ -22,7 +22,7 @@ class Settings(BaseSettings):
 
     # Groq (primary LLM provider — OpenAI-compatible API)
     groq_api_key: str = ""
-    groq_model: str = "llama-3.1-70b-versatile"
+    groq_model: str = "llama-3.3-70b-versatile"
     groq_base_url: str = "https://api.groq.com/openai/v1"
 
     # App

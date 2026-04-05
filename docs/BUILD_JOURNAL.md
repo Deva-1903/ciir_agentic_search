@@ -33,6 +33,8 @@ Build a provenance-first entity discovery app for the CIIR Agentic Search Challe
 - **Added (user):** `scripts/eval.py` + `docs/eval_queries.json` — CLI evaluation harness with 10 queries, 7 metrics
 - **Rebuilt (user):** UI — phase tracker, retrieval plan panel, quality controls panel, trust badges, run stats, enhanced modal, empty/error states
 - **Added (user):** Groq as primary LLM provider, OpenAI fallback, `_extract_json` markdown fence handling
+- **Fixed (user):** zero-entity regression — Groq decommissioned `llama-3.1-70b-versatile`; updated to `llama-3.3-70b-versatile`
+- **Added (user):** 0-entity safeguard log in pipeline — detects likely systemic extraction failure
 - **Current state:** full 11+-stage pipeline (incl. reranker, cell verifier ×2), Groq primary / OpenAI fallback, dark-theme UI with phase tracker, trust badges, quality panels, per-cell evidence modal, JSON/CSV export
 
 ---
@@ -711,6 +713,7 @@ Groq offers significantly faster inference (especially for Llama models) via an 
 Llama 3.1 models on Groq generally respect `response_format={"type": "json_object"}` and return raw JSON. However, in some edge cases (long prompts, complex schemas), the model wraps the JSON in \`\`\`json fences. Rather than adding a preprocessing step per caller, the centralized `_extract_json` handles this transparently. OpenAI models never exhibit this behavior, so the fallback path is a no-op for them.
 
 **Testing strategy:**
+
 - Unit tests pass because `llm.py` is mocked in all tests (no live API calls).
 - The provider-agnostic properties can be tested by setting `GROQ_API_KEY` to empty (falls back to OpenAI) or non-empty (activates Groq).
 - Full integration requires a valid `GROQ_API_KEY` and a running Groq-compatible endpoint.
@@ -723,6 +726,49 @@ Llama 3.1 models on Groq generally respect `response_format={"type": "json_objec
 - Groq's free tier has rate limits (requests per minute, tokens per minute). The existing retry logic in `chat_json()` handles `RateLimitError` with exponential backoff, which should absorb transient rate-limit hits.
 - Llama 3.1 70B is a strong general-purpose model but may produce slightly different JSON structure than GPT-4o-mini. The Pydantic validation layer catches structural mismatches; `_extract_json` catches formatting differences.
 - No provider-switching UI — the provider is determined at startup by which API key is set. This is intentional: the system runs one provider per session, not per-request.
+
+---
+
+### Iteration 14 — Groq Model Decommission Fix
+
+**Date:** 2026-04-04
+**Author:** User (directed), Claude (implementation)
+**Goal:** Debug and fix a regression where every query returns zero entities.
+
+**Symptoms:**
+- Every query returns "No entities found" — zero rows regardless of topic.
+- Pipeline completes in ~1 second (normally 15–60s).
+- Planner falls back to generic `entity` type with hardcoded columns (instead of LLM-inferred schema).
+- `entities_extracted=0` despite 8 pages successfully scraped.
+
+**Root cause:**
+Groq decommissioned `llama-3.1-70b-versatile` on January 24, 2025. Every API call returned HTTP 400 with error code `model_decommissioned`. The Iteration 13 migration hardcoded this model name. Both `planner.py` and `extractor.py` are designed to be resilient to transient LLM failures — the planner catches exceptions and falls back to a hardcoded plan, the extractor catches exceptions per-page and returns `[]`. This resilience pattern inadvertently masked a permanent configuration error, allowing the pipeline to complete "successfully" with 0 entities.
+
+**Diagnostic path:**
+1. Reproduced via `scripts/smoke_test.py` — confirmed 0 entities, fallback plan, 1.05s.
+2. Traced pipeline counts: `urls=9, scraped=8, reranked=8, extracted=0` — collapse at extraction.
+3. Server logs showed: `Error code: 400 - model_decommissioned` on every LLM call.
+4. Verified at https://console.groq.com/docs/deprecations — model deprecated 2025-01-24.
+5. Confirmed replacement `llama-3.3-70b-versatile` is active production model on Groq.
+
+**Fix (3 files):**
+- `app/core/config.py` — default `groq_model` changed from `llama-3.1-70b-versatile` to `llama-3.3-70b-versatile`.
+- `.env` — `GROQ_MODEL=llama-3.3-70b-versatile`.
+- `.env.example` — same.
+
+**Safeguard added:**
+- `app/api/routes_search.py` — after extraction, when `entities_extracted == 0` and `pages_scraped >= 3`, log an ERROR: "0 entities from N pages — likely systemic failure (model misconfiguration, API error, or prompt incompatibility)." This is log-only — does not change pipeline behavior.
+
+**Validation:**
+- Smoke test "open source database tools": 7 entities, 10.17s. Pipeline progressed through all phases.
+- Smoke test "AI startups in healthcare": 13 entities, 9.39s.
+- `pytest`: 129/129 passed (tests mock LLM — unaffected by model name change).
+
+**Why the failure was silent:**
+The planner and extractor error-handling was designed for transient failures (timeouts, rate limits, network errors). A model decommission is a permanent 400 error that looks structurally identical to a transient API error. The system has no way to distinguish "temporary hiccup" from "this model will never work again" without inspecting the error code. The safeguard log added here detects the downstream effect (0 entities from many pages) rather than the upstream cause, which is a pragmatic tradeoff — it catches any systemic extraction failure, not just model decommission.
+
+**Files changed:** `app/core/config.py`, `app/api/routes_search.py`, `.env`, `.env.example`.
+**Files created:** `scripts/smoke_test.py` (reusable HTTP smoke test harness).
 
 ---
 
@@ -751,6 +797,9 @@ Rewrote the frontend to communicate the pipeline's process and trust signals. Ad
 
 **Phase 8 (Iteration 13) — LLM Provider Migration:**  
 Switched primary LLM from OpenAI to Groq. Added provider-agnostic config properties, markdown-fence JSON extraction fallback, startup provider logging. OpenAI remains as transparent fallback when Groq API key is not set.
+
+**Phase 9 (Iteration 14) — Model Decommission Fix:**  
+Groq decommissioned `llama-3.1-70b-versatile` (2025-01-24). Every LLM call returned HTTP 400 `model_decommissioned`. Both planner and extractor silently swallowed errors (by design for transient failures), masking a permanent configuration error. Updated to `llama-3.3-70b-versatile`. Added pipeline safeguard that logs ERROR when extraction produces 0 entities from ≥3 pages.
 
 **Remaining gap:**  
 No ground-truth labels — metrics are proxy signals, not precision/recall.
@@ -934,6 +983,16 @@ No ground-truth labels — metrics are proxy signals, not precision/recall.
 
 ---
 
+### Issue: Every query returns zero entities after Groq migration
+
+**Detected in:** Iteration 14, user report  
+**Symptoms:** All queries return "No entities found." Pipeline completes in ~1s. Planner produces fallback plan (generic `entity` type). Extraction returns 0 entities from 8 scraped pages.  
+**Root cause:** `llama-3.1-70b-versatile` decommissioned by Groq (2025-01-24). Every LLM call returns HTTP 400 `model_decommissioned`. Planner silently falls back to hardcoded plan. Extractor silently returns `[]` per page. Pipeline completes "successfully" with 0 rows.  
+**Fix:** Updated model to `llama-3.3-70b-versatile` in config.py, .env, .env.example. Added 0-entity safeguard log in routes_search.py.  
+**Status:** Resolved.
+
+---
+
 ## Before vs After Improvements
 
 ### Improvement: Pipeline completion reliability
@@ -1019,7 +1078,7 @@ POST /api/search
 | `source_quality.py`  | User          | Functional | Domain lists hand-curated; food/startup-biased                                  |
 | `verifier.py`        | User          | Functional | Conservative; fallback prevents empty results                                   |
 | `exporter.py`        | Claude        | Stable     | JSON + CSV with per-column provenance                                           |
-| `llm.py`             | Claude + user | Stable     | Groq primary, OpenAI fallback, markdown fence extraction, 60s timeout |
+| `llm.py`             | Claude + user | Stable     | Groq primary, OpenAI fallback, markdown fence extraction, 60s timeout           |
 
 ### What is stable
 
@@ -1070,6 +1129,8 @@ POST /api/search
 
 9. **Groq rate limits:** Groq's free tier has per-minute request and token caps. The retry logic handles transient rate-limit errors, but sustained high-volume usage requires a paid plan.
 
-10. **Llama JSON reliability:** Llama 3.1 models occasionally wrap valid JSON in markdown code fences even with `json_object` response format. The `_extract_json()` fallback handles this, but very complex schemas may still produce parse failures more often than GPT-4o-mini.
+10. **Llama JSON reliability:** Llama 3.3 models occasionally wrap valid JSON in markdown code fences even with `json_object` response format. The `_extract_json()` fallback handles this, but very complex schemas may still produce parse failures more often than GPT-4o-mini.
 
 11. **Frontend source classification drift:** The UI trust badges classify source URLs using domain sets that mirror `source_quality.py`. If the backend domain lists are updated without updating the JS, the UI badges may disagree with backend scoring. This is informational only — the backend scoring is what matters for ranking.
+
+12. **Model deprecation risk:** Groq (and other providers) can decommission models without notice. The system detects the downstream symptom (0 entities from many pages) via the safeguard log, but does not detect the upstream cause (`model_decommissioned` error code) specifically. A future improvement could validate the model on startup or detect the specific error code in `chat_json()` and raise a non-swallowable error.
