@@ -48,6 +48,39 @@ async def test_plan_schema_uses_fallback_when_llm_fails(monkeypatch):
     plan = await planner.plan_schema("pizza places in Brooklyn")
     assert isinstance(plan, PlannerOutput)
     assert plan.facets, "fallback should produce facets"
+
+
+def test_planner_output_validates_without_search_angles():
+    """Regression test: LLM returns entity_type/columns/facets but NOT search_angles.
+    PlannerOutput must validate (search_angles defaults to [])."""
+    raw = {
+        "entity_type": "startup",
+        "columns": ["name", "website", "focus_area", "funding_stage"],
+        "facets": [
+            {
+                "type": "entity_list",
+                "query": "top AI startups in healthcare",
+                "expected_fill_columns": ["name", "website"],
+                "rationale": "discover candidates",
+            }
+        ],
+    }
+    plan = PlannerOutput.model_validate(raw)
+    assert plan.entity_type == "startup"
+    assert plan.search_angles == []
+    assert len(plan.facets) == 1
+
+
+def test_planner_output_validates_with_search_angles():
+    """search_angles can still be provided explicitly (backward compat)."""
+    raw = {
+        "entity_type": "restaurant",
+        "columns": ["name", "cuisine", "location"],
+        "search_angles": ["best pizza NYC", "top pizza Brooklyn"],
+        "facets": [],
+    }
+    plan = PlannerOutput.model_validate(raw)
+    assert plan.search_angles == ["best pizza NYC", "top pizza Brooklyn"]
     assert plan.search_angles, "search_angles should mirror facet queries"
     assert plan.columns[0] == "name"
 

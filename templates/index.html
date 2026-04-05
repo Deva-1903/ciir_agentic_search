@@ -87,6 +87,7 @@
             ><span class="stage-label">Verifying</span>
           </div>
         </div>
+        <div class="pipeline-query" id="pipeline-query"></div>
         <div class="pipeline-status">
           <div class="spinner"></div>
           <span id="phase-label" class="phase-label">Starting…</span>
@@ -96,7 +97,8 @@
 
       <!-- ── Error banner ───────────────────────────────────────────────────── -->
       <div id="error-banner" class="error-banner hidden">
-        <strong>Error:</strong> <span id="error-msg"></span>
+        <div class="error-banner__title">Pipeline Error</div>
+        <p class="error-detail" id="error-msg"></p>
         <p class="error-hint">
           Try a more specific query, or check server logs for details.
         </p>
@@ -104,11 +106,12 @@
 
       <!-- ── No-results banner ──────────────────────────────────────────────── -->
       <div id="no-results-banner" class="no-results-banner hidden">
-        <strong>No entities found.</strong>
-        <p>
-          The system could not extract confident entities for this query. Try a
-          more specific topic, e.g. "best pizza restaurants in Manhattan" rather
-          than "food".
+        <div class="no-results-title">No entities found</div>
+        <p class="no-results-query" id="no-results-query"></p>
+        <p class="no-results-hint">
+          The pipeline completed but could not extract confident entities. Try a
+          more specific topic, e.g. &ldquo;best pizza restaurants in
+          Manhattan&rdquo; rather than &ldquo;food&rdquo;.
         </p>
       </div>
 
@@ -116,30 +119,41 @@
       <section id="results-section" class="results-section hidden">
         <!-- Results summary strip -->
         <div class="summary-strip">
-          <div class="summary-strip__items">
+          <div class="summary-strip__top">
+            <span class="summary-query" id="sum-query"></span>
+            <div class="summary-strip__actions">
+              <button
+                id="btn-view-toggle"
+                class="btn btn--sm btn--outline"
+                onclick="toggleViewMode()"
+                style="display: none"
+              >
+                ⊟ Compact
+              </button>
+              <button id="btn-export-json" class="btn btn--sm btn--outline">
+                ↓ JSON
+              </button>
+              <button id="btn-export-csv" class="btn btn--sm btn--outline">
+                ↓ CSV
+              </button>
+            </div>
+          </div>
+          <div class="summary-strip__metrics">
             <span class="summary-item" id="sum-entity-type"></span>
             <span class="summary-item"
               ><strong id="sum-rows">0</strong> rows</span
             >
             <span class="summary-item"
-              ><strong id="sum-sources">0</strong> URLs inspected</span
+              ><strong id="sum-sources">0</strong> URLs</span
             >
             <span class="summary-item"
-              ><strong id="sum-scraped">0</strong> pages scraped</span
+              ><strong id="sum-scraped">0</strong> scraped</span
             >
             <span class="summary-item"
-              ><strong id="sum-extracted">0</strong> pages extracted</span
+              ><strong id="sum-extracted">0</strong> extracted</span
             >
             <span class="summary-item" id="sum-gapfill"></span>
             <span class="summary-item" id="sum-duration"></span>
-          </div>
-          <div class="summary-strip__actions">
-            <button id="btn-export-json" class="btn btn--sm btn--outline">
-              ↓ JSON
-            </button>
-            <button id="btn-export-csv" class="btn btn--sm btn--outline">
-              ↓ CSV
-            </button>
           </div>
         </div>
 
@@ -165,6 +179,10 @@
         </div>
 
         <!-- Results table -->
+        <p class="table-hint">
+          Click any cell to view its source URL, evidence snippet, and
+          confidence score.
+        </p>
         <div class="table-scroll">
           <table id="results-table" class="results-table">
             <thead id="table-head"></thead>

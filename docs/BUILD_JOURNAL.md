@@ -35,7 +35,9 @@ Build a provenance-first entity discovery app for the CIIR Agentic Search Challe
 - **Added (user):** Groq as primary LLM provider, OpenAI fallback, `_extract_json` markdown fence handling
 - **Fixed (user):** zero-entity regression — Groq decommissioned `llama-3.1-70b-versatile`; updated to `llama-3.3-70b-versatile`
 - **Added (user):** 0-entity safeguard log in pipeline — detects likely systemic extraction failure
-- **Current state:** full 11+-stage pipeline (incl. reranker, cell verifier ×2), Groq primary / OpenAI fallback, dark-theme UI with phase tracker, trust badges, quality panels, per-cell evidence modal, JSON/CSV export
+- **Split (user):** dual-provider routing — planner→OpenAI (gpt-4o-mini), extractor→Groq (llama-3.3-70b-versatile)
+- **Fixed (Claude):** broad-query zero-result regression — Groq extractor 429s now retry on OpenAI; added `pipeline_counts` metadata and stage-count logging
+- **Current state:** full 11+-stage pipeline (incl. reranker, cell verifier ×2), split-provider LLM (OpenAI planner + Groq extractor with OpenAI fallback on extraction failure), dark-theme UI with phase tracker, query echo, trust badges, quality panels, per-cell evidence modal with confidence badges, JSON/CSV export. **Planner silent fallback regression fixed** — `PlannerOutput.search_angles` default restored, planner now returns domain-specific entity types, columns, and typed facets on every query.
 
 ---
 
@@ -736,6 +738,7 @@ Llama 3.1 models on Groq generally respect `response_format={"type": "json_objec
 **Goal:** Debug and fix a regression where every query returns zero entities.
 
 **Symptoms:**
+
 - Every query returns "No entities found" — zero rows regardless of topic.
 - Pipeline completes in ~1 second (normally 15–60s).
 - Planner falls back to generic `entity` type with hardcoded columns (instead of LLM-inferred schema).
@@ -745,6 +748,7 @@ Llama 3.1 models on Groq generally respect `response_format={"type": "json_objec
 Groq decommissioned `llama-3.1-70b-versatile` on January 24, 2025. Every API call returned HTTP 400 with error code `model_decommissioned`. The Iteration 13 migration hardcoded this model name. Both `planner.py` and `extractor.py` are designed to be resilient to transient LLM failures — the planner catches exceptions and falls back to a hardcoded plan, the extractor catches exceptions per-page and returns `[]`. This resilience pattern inadvertently masked a permanent configuration error, allowing the pipeline to complete "successfully" with 0 entities.
 
 **Diagnostic path:**
+
 1. Reproduced via `scripts/smoke_test.py` — confirmed 0 entities, fallback plan, 1.05s.
 2. Traced pipeline counts: `urls=9, scraped=8, reranked=8, extracted=0` — collapse at extraction.
 3. Server logs showed: `Error code: 400 - model_decommissioned` on every LLM call.
@@ -752,14 +756,17 @@ Groq decommissioned `llama-3.1-70b-versatile` on January 24, 2025. Every API cal
 5. Confirmed replacement `llama-3.3-70b-versatile` is active production model on Groq.
 
 **Fix (3 files):**
+
 - `app/core/config.py` — default `groq_model` changed from `llama-3.1-70b-versatile` to `llama-3.3-70b-versatile`.
 - `.env` — `GROQ_MODEL=llama-3.3-70b-versatile`.
 - `.env.example` — same.
 
 **Safeguard added:**
+
 - `app/api/routes_search.py` — after extraction, when `entities_extracted == 0` and `pages_scraped >= 3`, log an ERROR: "0 entities from N pages — likely systemic failure (model misconfiguration, API error, or prompt incompatibility)." This is log-only — does not change pipeline behavior.
 
 **Validation:**
+
 - Smoke test "open source database tools": 7 entities, 10.17s. Pipeline progressed through all phases.
 - Smoke test "AI startups in healthcare": 13 entities, 9.39s.
 - `pytest`: 129/129 passed (tests mock LLM — unaffected by model name change).
@@ -769,6 +776,337 @@ The planner and extractor error-handling was designed for transient failures (ti
 
 **Files changed:** `app/core/config.py`, `app/api/routes_search.py`, `.env`, `.env.example`.
 **Files created:** `scripts/smoke_test.py` (reusable HTTP smoke test harness).
+
+---
+
+### Iteration 15 — Split-Provider Routing (Planner→OpenAI, Extractor→Groq)
+
+**Date:** 2026-04-04
+**Author:** User (directed), Claude (implementation)
+**Goal:** Route planning to OpenAI for structural reliability, extraction to Groq for speed.
+
+**Previous state:**
+Single-provider model — either Groq or OpenAI for all LLM calls, chosen at startup by which API key is set. `llm.py` had a single `_client` singleton. Both planner and extractor used the same model.
+
+**Why split:**
+
+- **Planning** requires structured schema inference (entity_type, columns, typed facets). GPT-4o-mini is more reliable at producing well-formed JSON with correct structure at low cost (~$0.15/$0.60 per M tokens).
+- **Extraction** is the bulk workload (8–16 LLM calls per query, one per page chunk). Groq’s Llama 3.3 70B runs at ~280 tokens/sec inference — significantly faster than OpenAI for the same quality tier, reducing pipeline latency.
+- Single-provider approach meant choosing between reliability (OpenAI for everything, slower) or speed (Groq for everything, weaker planning). The split gets both.
+
+**What was built:**
+
+1. **Config (`config.py`):**
+   - Added `planner_provider` (default: `"openai"`) and `extractor_provider` (default: `"groq"`) as env-settable fields.
+   - Added `provider_config(provider: str) -> tuple[str, str, str | None]` method returning (api_key, model, base_url) for any named provider. Eliminates scattered conditionals.
+   - Kept legacy `llm_provider`, `active_api_key`, `active_model`, `active_base_url` properties for backward compat.
+
+2. **LLM wrapper (`llm.py`):**
+   - Replaced single `_client` singleton with `_clients: dict[str, AsyncOpenAI]` — one per provider, lazily created on first use.
+   - `_get_client(provider)` returns `(client, model)` tuple. When `provider=None`, falls back to legacy single-provider path.
+   - `chat_json()` and `chat_json_validated()` accept an optional `provider` kwarg. Callers that pass it get routed to the correct client/model. Callers that don’t still work via the legacy path.
+   - Each client is logged on creation: `LLM client [openai]: model=gpt-4o-mini  base_url=(default)`.
+
+3. **Planner (`planner.py`):**
+   - Now passes `provider=settings.planner_provider` to `chat_json_validated()`.
+   - Default routes to OpenAI.
+
+4. **Extractor (`extractor.py`):**
+   - Now passes `provider=settings.extractor_provider` to `chat_json()`.
+   - Default routes to Groq. Gap-fill also uses the extractor path, so it inherits Groq routing automatically.
+
+5. **Startup log (`main.py`):**
+   - Changed from `llm=groq model=llama-3.3-70b-versatile` to `planner=openai/gpt-4o-mini  extractor=groq/llama-3.3-70b-versatile`.
+
+6. **Environment:**
+   - `.env` updated with `PLANNER_PROVIDER=openai`, `EXTRACTOR_PROVIDER=groq`.
+   - `.env.example` rewritten with both providers as required (not fallback).
+   - `README.md` env var table updated.
+
+**Testing:**
+
+- 8 new tests in `tests/test_provider_routing.py`: config routing (openai/groq), default routing values, override support, legacy property backward compat, planner provider passthrough, extractor provider passthrough.
+- 2 existing extractor tests updated (added `extractor_provider` to `SimpleNamespace` mocks).
+- **137/137 tests pass.**
+- Smoke test: pipeline completed end-to-end with split providers. Startup log confirmed `planner=openai/gpt-4o-mini extractor=groq/llama-3.3-70b-versatile`. Extraction degraded by Groq free-tier rate limiting (429s on TPM), not by the routing change.
+
+**What was NOT verified live:**
+
+- Planner LLM output quality comparison (OpenAI vs Groq for planning) — would require multiple A/B test runs.
+- Extraction speed difference — Groq rate limiting masked any latency improvement on free tier.
+
+**Files changed:** `app/core/config.py`, `app/services/llm.py`, `app/services/planner.py`, `app/services/extractor.py`, `app/main.py`, `.env`, `.env.example`, `README.md`, `tests/test_extractor.py`.
+**Files created:** `tests/test_provider_routing.py`.
+
+**Tradeoffs:**
+
+- Two API keys are now required instead of one. If either is missing, the provider’s calls will fail. The system does not validate keys at startup — failures surface as API errors at call time.
+- Groq rate limits are stricter on free tier (12K TPM). With concurrent extraction across 8+ pages, rate-limit 429s are common. The existing retry logic handles `RateLimitError` with backoff but only retries within the `attempts` budget (default 1 for extraction — no retries).
+- The routing vars (`PLANNER_PROVIDER`, `EXTRACTOR_PROVIDER`) accept any string. There’s no validation that the string maps to a real provider with a configured API key. Invalid values will fail at runtime when `provider_config()` returns empty credentials.
+- Legacy single-provider mode still works: if `provider` kwarg is not passed to `chat_json`, it uses the old `active_*` properties. No existing code paths rely on this anymore, but it’s preserved for safety.
+
+---
+
+### Iteration 16 — Results Table Layout Overhaul
+
+**Date:** 2025-07-25
+**Author:** User (directed), Claude (implementation)
+**Goal:** Make the results table wider, more stable, and reviewer-ready — especially for wide/dynamic schemas.
+
+**Previous state:**
+The results section was constrained inside `.app { max-width: 1200px }`, leaving excessive whitespace on either side of the table. All data columns had identical `min-width: 140px / max-width: 220px` regardless of content type. No sticky header — scrolling long tables lost column context. No zebra striping or visual rhythm. Wide schemas with many columns collapsed awkwardly.
+
+**What was built:**
+
+1. **Breakout container (`style.css`):**
+   - `.results-section` now breaks out of the 1200px app container using `margin-left: calc(-50vw + 50%)` and `max-width: 95vw`. The search form and panels remain centered; the table spans nearly full viewport width.
+   - Mobile responsive: collapses to `100vw` with minimal padding at `≤700px`.
+
+2. **Sticky header (`style.css`):**
+   - Table header (`th`) is `position: sticky; top: 0; z-index: 10` inside the scroll container.
+   - `max-height: 80vh` on `.table-scroll` ensures vertical scrolling triggers the sticky behavior for long result sets.
+
+3. **Zebra striping (`style.css`):**
+   - `tbody tr:nth-child(even) td` gets a subtle dark tint (`rgba(30, 34, 50, 0.45)`). Row hover still overrides with `--bg-hover`.
+
+4. **Smart column sizing (`app.js` + `style.css`):**
+   - New `colSizeClass(col)` function classifies columns by name into four sizing tiers:
+     - `col-name-data` (name/entity_name/company/title): 180–280px
+     - `col-url-data` (url/website/homepage/link/\*\_url): 160–300px, word-break
+     - `col-desc-data` (description/summary/overview/bio): 200–360px
+     - `col-default-data` (everything else): 120–240px
+   - Classes applied to both `th` and `td` (including empty cells) during table rendering.
+   - `table-layout: auto` allows the browser to distribute remaining space naturally.
+
+5. **Visual polish (`style.css`):**
+   - Increased cell padding from `0.55rem 0.8rem` to `0.6rem 1rem` for breathing room.
+   - Header bottom border from `1px` to `2px` for stronger visual separation.
+   - `.cell-value` max-width changed from `90%` to `calc(100% - 16px)`.
+   - `.col-idx` and `.col-trust` min/max widths tightened.
+   - Border moved from table to `.table-scroll` wrapper.
+   - `border-collapse: separate` + `border-spacing: 0` (required for sticky header).
+
+**Testing:**
+
+- Visual inspection: table fills viewport width, columns size per type, header stays pinned on scroll, zebra striping visible, hover/modal/export all work.
+- No backend changes — purely frontend CSS/JS.
+
+**Files changed:** `static/style.css`, `static/app.js`.
+
+**Tradeoffs:**
+
+- Breakout container uses `calc(-50vw + 50%)` — assumes `.app` parent is centered.
+- Column sizing is keyword-based; unusual column names fall to default tier.
+- `max-height: 80vh` on `.table-scroll` means long tables scroll within the container rather than extending the page.
+
+---
+
+### Iteration 17 — Dynamic Schema-Aware Table Rendering
+
+**Date:** 2026-04-04
+**Author:** User (directed), Claude (implementation)
+**Goal:** Make the table rendering handle variable-width schemas intelligently — different queries produce different column sets, and the naive approach broke visually for wide or text-heavy schemas.
+
+**Issue observed:**
+Dynamic schemas meant the same table renderer saw 4-column results (e.g. "top pizza places") and 10-column results (e.g. "AI startups in healthcare" with funding_stage, investors, headquarters, etc.). The Iteration 16 layout improvements (wider container, sticky header) helped but the column sizing was still flat — every column got the same `min-width`/`max-width` regardless of content type. Long text fields (description, notable_claim) pushed all other columns off-screen. URLs rendered as full-length strings eating available width. No way to prioritize important columns (name, rating) over auxiliary ones (summary, notes).
+
+**Why dynamic schemas caused instability:**
+
+1. **Uniform column sizing:** All data columns shared the same 4-class system (`col-name-data`, `col-url-data`, `col-desc-data`, `col-default-data`) with overlapping widths. A 10-column schema exceeded viewport width and every column got squashed equally.
+2. **No column ordering:** Columns rendered in backend order, so `description` could appear before `name`.
+3. **No text adaptation:** A 200-character description cell rendered the same way as a 5-character rating.
+4. **No wide-schema awareness:** The CSS had no concept of "this schema has many columns, tighten up."
+
+**What was built:**
+
+1. **Column priority system (`app.js`):**
+   - `COL_PRIORITY` map with 4 tiers: highest (name/entity_name/company/title), high (website/address/headquarters/rating/funding_stage), medium (price_range/phone/category/investors), low (description/summary/notable_claim/notes).
+   - `colPriority(col)` resolves any column name to a tier (0–3) with heuristic fallbacks for `*_url` → high, `*description*` → low, everything else → medium.
+   - `sortColumnsByPriority(cols)` reorders columns so name appears first, then high-priority structured fields, then medium, then long text last.
+   - Replaces the old `colSizeClass()` 4-class system.
+
+2. **Priority-based CSS classes (`style.css`):**
+   - `col-pri-highest`: 180–300px, font-weight 500.
+   - `col-pri-high`: 140–260px.
+   - `col-pri-medium`: 110–200px.
+   - `col-pri-low`: 100–280px (wide max for text, but clamped visually).
+   - Wide-schema overrides (`.wide-schema .col-pri-*`): when table has 7+ columns, all tiers get tighter min/max widths.
+
+3. **Safe text rendering (`app.js` + `style.css`):**
+   - **URLs:** `truncateUrl()` extracts hostname + path and truncates to 40 chars with ellipsis. Full URL preserved in `td.title` and modal view. Rendered with monospace `.cell-url` class.
+   - **Long text:** `.cell-text-clamp` uses `-webkit-line-clamp: 2` for a 2-line visual clamp. Full text accessible via click-to-modal.
+   - **Short/categorical fields:** Render as-is with single-line ellipsis overflow.
+   - **Empty cells:** Em dash placeholder (unchanged from Iteration 16).
+
+4. **Wide schema handling (`app.js` + `style.css`):**
+   - `renderTable()` adds `.wide-schema` class to the table when columns > 6.
+   - CSS responds with tighter min/max widths across all priority tiers.
+   - Horizontal scroll container (from Iteration 16) ensures all columns remain accessible.
+
+5. **Compact/full view toggle (`app.js` + `index.html` + `style.css`):**
+   - Toggle button ("⊟ Compact" / "⊞ Full view") added to summary strip actions, next to export buttons.
+   - Compact mode: hides low-priority columns (`display: none`), tightens padding, reduces medium-column widths.
+   - Button auto-hidden when schema has ≤ 4 columns (not useful for narrow schemas).
+   - State managed via `_viewCompact` flag; toggled by `toggleViewMode()`.
+
+**Files changed:** `static/app.js`, `static/style.css`, `templates/index.html`.
+
+**Tradeoffs:**
+
+- Column priority is keyword-based. Novel column names (e.g. `clinical_trial_phase`) fall to medium priority by default — not wrong, but not optimized.
+- `sortColumnsByPriority()` reorders columns away from the backend's original order. If the backend order was intentional (e.g. user-facing schema design), the reorder may surprise.
+- `-webkit-line-clamp` is not a formal CSS standard (though widely supported). Firefox has supported it since v68.
+- Compact mode hides low-priority columns entirely. If a user needs to see `description` data without scrolling, they must toggle back to full view.
+- The priority map must be maintained manually — new domain-specific columns won't automatically get the right tier.
+
+---
+
+### Iteration 18 — Reviewer-Facing Communication Polish
+
+**Date:** 2026-04-04  
+**Author:** User (directed), Claude (implementation)  
+**Goal:** Make the UI intelligible to a reviewer within 30 seconds — what query was run, what the system did, why the table can be trusted, how to inspect evidence, and how much work was performed. No backend changes, no decorative additions.
+
+**Issue observed:**
+The UI from Iterations 12–17 was functionally complete but not oriented toward a reviewer scanning the page for the first time. Specific gaps:
+
+1. The summary strip didn't echo the original query — a reviewer couldn't see what was searched.
+2. The pipeline tracker showed stage progress but not what query was being processed.
+3. Error and no-results banners were generic ("Error:" + message) with no query context.
+4. The evidence modal's confidence display was plain text instead of a visual signal.
+5. Panel body text was tight with no line-height breathing room.
+6. No affordance hinting that cells are clickable for evidence.
+
+**What was built:**
+
+1. **Summary strip two-row layout (`index.html` + `style.css` + `app.js`):**
+   - Top row: query echo (in smart quotes) + action buttons (compact toggle, JSON, CSV export).
+   - Bottom row: entity type badge + metrics (rows, URLs, scraped, extracted, gap-fill, duration).
+   - Query stored in `currentQuery` state variable and populated from form submit.
+   - Metric labels shortened for scanability ("URLs" not "URLs inspected", "scraped" not "pages scraped").
+   - Duration prefixed with ⏱ symbol.
+
+2. **Pipeline tracker query echo (`index.html` + `style.css` + `app.js`):**
+   - New `.pipeline-query` element shows the running query in quotes above the progress stages.
+   - Populated on form submit; hidden when empty via `:empty` CSS rule.
+
+3. **Error/no-results diagnostic context (`index.html` + `style.css` + `app.js`):**
+   - Error banner restructured: title ("Pipeline Error"), detail message, hint on separate lines.
+   - No-results banner: title, query echo line ("Query: '...'"), and diagnostic hint as separate elements.
+   - No-results query populated from `currentQuery` state.
+
+4. **Table evidence hint (`index.html` + `style.css`):**
+   - "Click any cell to view its source URL, evidence snippet, and confidence score." hint above the table.
+   - Styled small, dim, unobtrusive.
+
+5. **Evidence modal confidence badge (`style.css`):**
+   - Confidence display changed from plain text to a pill badge with color-coded background/border.
+   - Green pill for ≥80%, yellow for ≥50%, red for <50%. Matches existing conf-dot color scheme.
+   - Snippet blockquote given subtle background tint and rounded right corners.
+
+6. **Panel readability (`style.css`):**
+   - Panel body line-height increased to 1.6 for better readability.
+   - Quality controls list items given more vertical and horizontal gap.
+   - QC icons given fixed width for alignment.
+
+**Files changed:** `templates/index.html`, `static/style.css`, `static/app.js`.
+
+**Tradeoffs:**
+
+- Query echo relies on `currentQuery` JS state — if the page is refreshed mid-results, the query echo is lost (acceptable: results are also lost on refresh).
+- Confidence badge colors duplicate the badge CSS pattern used in trust badges. Could be consolidated into shared utility classes, but keeping them separate avoids coupling.
+- The table hint is static text — it doesn't disappear after the user clicks a cell. Acceptable for a reviewer demo.
+
+---
+
+### Iteration 19 — Silent Planner Fallback Regression Fix
+
+**Date:** 2026-04-04  
+**Author:** User (directed), Claude (investigation + implementation)  
+**Goal:** Find and fix the regression where broad queries like "AI startups in healthcare" return only 1 entity with `entity_type="entity"` and generic columns, instead of ~16+ specific entities.
+
+**Issue observed:**
+Queries that should discover many entities started returning exactly 1 row, generic entity_type `"entity"`, generic columns (`name`, `website`, `description`, `category`, `location`), and `rerank_scorer=null`. The planner was silently falling back to its hardcoded fallback plan on every query, making the extractor work with vague instructions and few search angles.
+
+**Root cause:**
+`PlannerOutput` in `app/models/schema.py` defined `search_angles: List[str]` as a **required field** (no default value). The planner LLM prompt asks for `entity_type`, `columns`, and `facets` — but **not** `search_angles`. The design is that `search_angles` is derived post-validation from `facets` (line: `result.search_angles = [f.query for f in result.facets][:5]`).
+
+However, `plan_schema()` calls `chat_json_validated()`, which calls `PlannerOutput.model_validate(raw)` on the raw LLM response. Since the LLM never returns `search_angles`, Pydantic validation **always** raised `ValidationError` for the missing required field. The exception was caught by the `try/except` in `plan_schema()`, which then called `_fallback_plan()` — returning `entity_type="entity"` and 5 generic columns.
+
+This means the planner has been falling back on **every single query** since `search_angles` was added to the model. The bug was silent because the fallback plan still produced valid (but degraded) results.
+
+**Reproduction:**
+Wrote a Python script confirming that `PlannerOutput.model_validate({"entity_type": "startup", "columns": [...], "facets": [...]})` raises `ValidationError: search_angles — Field required`. Adding `search_angles: List[str] = Field(default_factory=list)` makes validation succeed and the post-validation derivation from facets works correctly.
+
+**Fix applied:**
+
+| File                 | Change                                                                          |
+| -------------------- | ------------------------------------------------------------------------------- |
+| `app/models/schema.py` | `search_angles: List[str]` → `search_angles: List[str] = Field(default_factory=list)` |
+
+One-line change. The field now defaults to `[]` if the LLM omits it (which it always does), and the post-validation derivation from facets populates it correctly.
+
+**Tests added:**
+
+| Test file               | Test name                                                    | Purpose                                         |
+| ----------------------- | ------------------------------------------------------------ | ----------------------------------------------- |
+| `tests/test_planner.py` | `test_planner_output_validates_without_search_angles`        | Core regression test — validates without field   |
+| `tests/test_planner.py` | `test_planner_output_validates_with_search_angles`           | Backward compat — validates with field present   |
+| `tests/test_extractor.py` | `test_extract_from_chunk_preserves_multiple_entities`      | Verifies all entities from multi-entity response |
+| `tests/test_extractor.py` | `test_extract_from_pages_accumulates_across_pages`         | Verifies cross-page accumulation (extend, not overwrite) |
+
+All 141 tests pass (137 original + 4 new).
+
+**Live validation — "AI startups in healthcare":**
+
+| Metric              | Before (fallback)         | After (fixed planner)                                              |
+| ------------------- | ------------------------- | ------------------------------------------------------------------ |
+| `entity_type`       | `"entity"` (generic)      | `"startup"` (domain-specific)                                      |
+| `columns`           | `name, website, description, category, location` | `name, founders, funding, headquarters, focus_area, website` |
+| `facets`            | 3 generic paraphrase facets | 5 typed facets (entity_list, official_source, editorial_review, news_recent, comparison) |
+| `entities_extracted`| 1                          | 93                                                                 |
+| `entities_after_merge` | 1                       | 82                                                                 |
+| `pages_scraped`     | ~8                         | 8                                                                  |
+| `urls_considered`   | ~13                        | 12                                                                 |
+
+The fixed planner produces a domain-specific entity type, meaningful columns, and typed facets that generate better Brave search queries. The extractor, receiving instructions to find `startup` entities with specific columns, returns 93 entities from the same number of pages.
+
+**Why this was hard to find:**
+The fallback was designed for graceful degradation — the pipeline still produced results (just worse ones). No error was logged at WARNING or above; only a DEBUG-level catch in `plan_schema()` fired. The `search_angles` field was derived from facets *after* validation, but adding it to the Pydantic model as required meant validation always failed *before* the derivation could run.
+
+**Tradeoffs:**
+- The fix makes `search_angles` optional at the Pydantic layer. If future code depends on `search_angles` being populated at validation time (before post-processing), it would find an empty list. This is acceptable because the field is always populated immediately after validation.
+
+---
+
+### Iteration 20 - Fixing zero-entity completion regression on broad queries
+Date: 2026-04-04
+Goal: Find why broad discovery queries like "top pizza places in Brooklyn" completed with zero final rows, restore sane output quality, and add enough observability to prove the failure stage quickly next time.
+Initial assumption: The most likely failure was somewhere between reranking and verification, but the first step was to prove whether rows were being extracted and filtered later or whether extraction itself had already collapsed.
+Issue discovered: The collapse happened at extraction, not planning, reranking, merge, prune, verifier, serialization, or the UI. The planner produced `entity_type="pizza place"`, 6 relevant columns, and 5 typed facets. Brave search returned 18-21 deduped URLs, scrape kept 12-14 pages, reranker kept 10 pages, and then extraction returned 0 entities.
+How it manifested: `scripts/smoke_test.py` against the live `/api/search` route returned `rows=0`, `pages_after_rerank=10`, `entities_extracted=0`, `entities_after_merge=0`, and the frontend showed the no-results banner only because `job.result.rows.length === 0`. A direct trace of the reranked pages showed that all 10 pages were plausible pizza-list or official pages, so the retrieval stack was healthy.
+Why the old behavior was insufficient: `extractor.py` caught every LLM exception per page and converted it to `[]`. When the primary extractor provider fails systematically, the pipeline still "completes" and downstream stages see empty input, which makes the UI look like the query was bad instead of the extraction provider failing.
+Root cause analysis: The split-provider routing from Iteration 15 sent all extraction calls to Groq. On the live pizza trace every Groq extraction call failed with HTTP 429 `rate_limit_exceeded` on `llama-3.3-70b-versatile`. A one-page sanity check using the same prompt/parser but forcing `provider="openai"` returned 15 pizza entities immediately, proving the prompt, parser, aggregation, and merge logic were not the problem. The first true collapse was therefore: Groq 429s -> extractor swallows exception -> empty draft list -> merge/prune/verifier never see rows. Backend JSON was genuinely empty, so the UI banner was correct and not itself the bug.
+What was built or changed:
+- `app/services/extractor.py`: added ordered extractor-provider fallback logic. Extraction now tries the configured primary provider first, then retries the same chunk on a configured secondary provider instead of returning `[]` immediately.
+- `app/services/extractor.py`: added optional extraction stats counters (`llm_calls_attempted`, `provider_fallback_attempts`, `provider_fallback_successes`, `chunks_seen`, `pages_seen`, `pages_with_entities`).
+- `app/api/routes_search.py`: added `pipeline_counts` tracking for search angles, facets, deduped URLs, scraped pages, reranked pages, extraction calls, merge/prune/verifier counts, and final rows. Also added a warning when extracted entities exist but final rows end up at zero.
+- `app/models/schema.py`: extended `SearchMetadata` with `pipeline_counts`.
+- `scripts/smoke_test.py`: now prints `pipeline_counts` for quick regression tracing.
+- `tests/test_extractor.py`: added a regression test proving extractor fallback from Groq to OpenAI on provider failure.
+Why this fix was chosen: The prompt/parser path was already proven healthy when run through OpenAI, so the smallest safe fix was to repair provider-failure handling rather than redesign extraction or loosen quality filters. This keeps existing planner, reranker, merge, prune, and verifier behavior intact while preventing a transient or quota-based provider outage from being silently reinterpreted as "no entities found."
+What happened when it was run/tested:
+- Live route, before fix, `"top pizza places in Brooklyn"`: `rows=0`, `pages_after_rerank=10`, `entities_extracted=0`.
+- Live route, after fix, `"top pizza places in Brooklyn"`: `rows=30`, `entities_extracted=102`, `rows_after_merge=53`, `rows_after_verifier=30`, `final_rows=30`, `provider_fallback_attempts=15`, `provider_fallback_successes=13`.
+- Live route, after fix, `"AI startups in healthcare"`: `rows=23`, `entities_extracted=24`, `rows_after_merge=23`, `final_rows=23`, `provider_fallback_attempts=14`, `provider_fallback_successes=7`.
+- Full test suite: 142/142 passed.
+Failures / issues observed: Groq remained rate-limited during validation, so extraction latency increased substantially because many chunk calls had to retry on OpenAI. The fix restored correctness and non-zero outputs, but not Groq throughput.
+What was fixed immediately: The extractor now retries on a secondary provider when the primary provider fails, and the response metadata/logs now expose enough counts to pinpoint whether collapse happens at extraction, merge/prune, or verification.
+What was deferred: No startup-time provider health check was added, and Groq-specific error classification still lives only in logs rather than a dedicated structured error channel. The planner's generic fallback behavior also remains as a separate resilience tradeoff.
+Resulting improvement: Broad but valid discovery queries no longer collapse to zero rows just because the primary extractor provider is quota-limited. The pipeline now degrades into a slower secondary-provider extraction path instead of an empty-result path.
+Tradeoffs introduced: Extraction can take noticeably longer and consume secondary-provider budget when Groq is rate-limited. `pipeline_counts` slightly increases response metadata size, but it is compact and useful for debugging.
+Files/modules affected: `app/services/extractor.py`, `app/api/routes_search.py`, `app/models/schema.py`, `scripts/smoke_test.py`, `tests/test_extractor.py`, `docs/BUILD_JOURNAL.md`.
+Next step: Add a bounded provider-health or quota-awareness check so the pipeline can choose the fallback provider earlier, reducing the long extraction stall before fallback succeeds.
 
 ---
 
@@ -801,8 +1139,20 @@ Switched primary LLM from OpenAI to Groq. Added provider-agnostic config propert
 **Phase 9 (Iteration 14) — Model Decommission Fix:**  
 Groq decommissioned `llama-3.1-70b-versatile` (2025-01-24). Every LLM call returned HTTP 400 `model_decommissioned`. Both planner and extractor silently swallowed errors (by design for transient failures), masking a permanent configuration error. Updated to `llama-3.3-70b-versatile`. Added pipeline safeguard that logs ERROR when extraction produces 0 entities from ≥3 pages.
 
-**Remaining gap:**  
-No ground-truth labels — metrics are proxy signals, not precision/recall.
+**Phase 10 (Iteration 15) — Split-Provider Routing:**  
+Split LLM usage: planner routes to OpenAI (gpt-4o-mini) for structural reliability, extractor routes to Groq (llama-3.3-70b-versatile) for faster inference. Dual-client pool in `llm.py`, env-based routing via `PLANNER_PROVIDER` and `EXTRACTOR_PROVIDER`. Outcome: best-of-both-providers — reliable schema planning + fast bulk extraction.
+
+**Phase 11 (Iterations 16–18) — Reviewer-Ready UI:**  
+Widened results container to 95vw with sticky header and zebra rows (Iteration 16). Added priority-based column sizing, compact/full view toggle, URL truncation, and text clamping (Iteration 17). Polished reviewer-facing communication: query echo in summary strip and pipeline tracker, two-row summary layout, confidence badge pills in modal, diagnostic error/no-results banners, table evidence hint, panel readability improvements (Iteration 18). Outcome: a reviewer can orient within 30 seconds on what was queried, what work was performed, and how to drill into evidence.
+
+**Phase 12 (Iteration 19) — Silent Planner Regression Fix:**  
+`PlannerOutput.search_angles` was a required Pydantic field that the LLM never returned, causing validation to fail silently on every query and forcing the planner into its generic fallback plan. One-line fix (default_factory=list) restored domain-specific planning. Live validation: "AI startups in healthcare" went from 1 generic entity to 93 extracted / 82 merged entities with domain-specific entity type, columns, and typed retrieval facets. Added 4 regression tests (141 total).
+
+**Phase 13 (Iteration 20) — Extraction Provider Fallback + Stage Counts:**  
+Broad discovery queries regressed to zero rows because Groq extraction 429s were being silently converted into empty entity lists. Added extractor-provider fallback (Groq -> OpenAI when configured) and `pipeline_counts` metadata covering search, extraction, merge, prune, verifier, and final-row counts. Live validation: "top pizza places in Brooklyn" went from 0 rows / 0 extracted to 30 final rows / 102 extracted, and "AI startups in healthcare" returned 23 final rows.
+
+**Remaining gaps:**  
+No ground-truth labels — metrics are proxy signals, not precision/recall. Fallback behavior now protects against empty results, but it can trade correctness for latency/cost when the primary provider is degraded (see Known Limitation #9 and #13).
 
 ---
 
@@ -993,6 +1343,27 @@ No ground-truth labels — metrics are proxy signals, not precision/recall.
 
 ---
 
+### Issue: Planner always falls back to generic plan — silent `search_angles` validation failure
+
+**Detected in:** Iteration 19, user report (entity_type="entity", generic columns, 1 entity returned)  
+**Symptoms:** Every query returns entity_type `"entity"`, generic columns, weak facets, and few extracted entities. Planner appears to work but always uses the hardcoded fallback plan. No WARNING or ERROR log emitted.  
+**Root cause:** `PlannerOutput.search_angles` was a required Pydantic field (`List[str]` with no default). The planner prompt does not ask the LLM to return `search_angles` — the field is derived from facets post-validation. But `model_validate()` always raised `ValidationError` for the missing field before derivation could run. The exception was caught silently by `plan_schema()`'s `try/except`, triggering `_fallback_plan()`.  
+**Fix:** `search_angles: List[str] = Field(default_factory=list)` — one-line default addition. Post-validation derivation then populates the field from facets.  
+**Impact:** Affected every query since the `search_angles` field was added. The planner was never returning its actual LLM-inferred plan.  
+**Status:** Resolved.
+
+---
+
+### Issue: Broad queries complete with zero rows when extractor provider is rate-limited
+
+**Detected in:** Iteration 20, user report (`"top pizza places in Brooklyn"` returns "No entities found")  
+**Symptoms:** Broad queries reached `done` status with `rows=[]`, `entities_extracted=0`, and the frontend no-results banner, even though the planner output, scraped pages, and reranked pages all looked healthy.  
+**Root cause:** `extractor.py` routed every chunk to Groq and caught any provider failure by returning `[]`. Under sustained Groq 429 `rate_limit_exceeded`, every extraction call failed, so merge/prune/verifier received zero drafts and the backend returned an empty result set.  
+**Fix:** Added ordered extractor-provider fallback (primary extractor provider first, then a configured secondary provider), plus `pipeline_counts` metadata/logging so the first collapsing stage is visible in smoke tests and final responses.  
+**Status:** Resolved.
+
+---
+
 ## Before vs After Improvements
 
 ### Improvement: Pipeline completion reliability
@@ -1035,6 +1406,14 @@ No ground-truth labels — metrics are proxy signals, not precision/recall.
 
 ---
 
+### Improvement: Broad-query resilience under provider failure
+
+**Before:** A quota-limited extractor provider produced the same user-visible result as a genuinely empty query: 0 extracted entities, 0 merged rows, and "No entities found." No per-stage counts in the final response made the collapse point hard to prove.  
+**After:** Extraction retries on a configured secondary provider, and `pipeline_counts` shows search, extraction, merge, prune, verifier, and final-row counts in the response metadata. Broad queries now degrade to slower extraction rather than empty output.  
+**What caused improvement:** Iteration 20 provider fallback + stage-count observability.
+
+---
+
 ## Current Architecture
 
 ### Pipeline stages (in order)
@@ -1048,7 +1427,7 @@ POST /api/search
 3. scraper.py         — async fetch (semaphore=5), trafilatura→BS4, SQLite cache (24h TTL)
 3.5 reranker.py       — cross-encoder rerank (ms-marco-MiniLM-L-6-v2) or Jaccard fallback
 4. extractor.py       — LLM extraction per page + field_validator at cell boundary
-                        30s timeout per call, 1 attempt (fail-fast per page)
+                        primary provider first, then configured fallback provider on failure
 5. merger.py          — rapidfuzz + domain dedup, best-confidence cell wins, lookup refresh
 6. prune_rows()       — remove non-viable rows (no name, or name-only with weak columns)
 7. rank_rows()        — completeness(0.25) + confidence(0.20) + source_quality(0.32)
@@ -1058,17 +1437,17 @@ POST /api/search
 8.5 cell_verifier.py  — second pass after gap-fill
 9. verify_rows()      — marketplace-only filter, source quality threshold, fallback
 10. prune + re-rank   — second cleanup pass with final ordering
-11. complete_job()    — write result JSON to SQLite
+11. complete_job()    — write result JSON + `pipeline_counts` metadata to SQLite
 ```
 
 ### Module status
 
 | Module               | Author        | Status     | Notes                                                                           |
 | -------------------- | ------------- | ---------- | ------------------------------------------------------------------------------- |
-| `planner.py`         | Claude        | Stable     | Good schema quality on gpt-4o-mini                                              |
+| `planner.py`         | Claude        | Stable     | Good schema quality on gpt-4o-mini; silent fallback regression fixed (Iter 19)  |
 | `brave_search.py`    | Claude        | Stable     | 15–25 unique URLs typical                                                       |
 | `scraper.py`         | Claude        | Stable     | trafilatura handles most pages; JS-rendered pages skipped                       |
-| `extractor.py`       | Claude + user | Stable     | Semaphore + chunker fix in place                                                |
+| `extractor.py`       | Claude + user | Stable     | Semaphore + chunker fix in place; automatic provider fallback added in Iter 20  |
 | `merger.py`          | Claude + user | Stable     | Lookup refresh fix applied                                                      |
 | `ranker.py`          | Claude + user | Stable     | 6-component score; source_quality dominant (0.32), diversity tie-breaker (0.08) |
 | `reranker.py`        | Claude        | Stable     | Cross-encoder ms-marco-MiniLM-L-6-v2 + Jaccard fallback                         |
@@ -1078,15 +1457,16 @@ POST /api/search
 | `source_quality.py`  | User          | Functional | Domain lists hand-curated; food/startup-biased                                  |
 | `verifier.py`        | User          | Functional | Conservative; fallback prevents empty results                                   |
 | `exporter.py`        | Claude        | Stable     | JSON + CSV with per-column provenance                                           |
-| `llm.py`             | Claude + user | Stable     | Groq primary, OpenAI fallback, markdown fence extraction, 60s timeout           |
+| `llm.py`             | Claude + user | Stable     | Dual-provider pool (OpenAI planner + Groq extractor), markdown fence extraction, 60s timeout |
 
 ### What is stable
 
 - Full pipeline from query to ranked table
 - Per-cell provenance (source_url, title, snippet, confidence)
+- Per-stage `pipeline_counts` metadata for live debugging
 - SQLite caching of scraped pages (24h TTL in `/tmp`)
 - JSON/CSV export with provenance columns
-- Dark-theme UI with phase tracker, trust badges, quality/stats panels, and evidence modal
+- Dark-theme UI with phase tracker, trust badges, quality/stats panels, evidence modal, and full-width sticky-header results table
 
 ### What is still weak
 
@@ -1094,7 +1474,7 @@ POST /api/search
 - **JS-rendered pages:** SPAs return empty content — skipped by `_MIN_TEXT_LENGTH` threshold
 - **Source domain lists:** `source_quality.py` is calibrated for food/startup queries; other domains get neutral `unknown` score
 - ~~**No URL validation:**~~ **Resolved** in Iteration 10 — `field_validator.py` rejects bare words, normalizes scheme/host
-- **Schema planner edge cases:** very broad queries produce generic columns
+- ~~**Schema planner edge cases:**~~ **Resolved** in Iteration 19 — `PlannerOutput.search_angles` required-field bug caused permanent fallback on all queries. Fixed by adding `default_factory=list`.
 - ~~**No source diversity constraint:**~~ **Resolved** in Iteration 10 — `_source_diversity()` in `ranker.py` with 0.08 weight
 - ~~**No automated evaluation:**~~ **Resolved** in Iteration 11 — `scripts/eval.py` provides a repeatable CLI harness with 10 queries, 7 metrics, and tag-based ablation support
 
@@ -1127,10 +1507,12 @@ POST /api/search
 
 8. **No query caching:** Re-running the same query re-executes the full pipeline. Only page scraping is cached.
 
-9. **Groq rate limits:** Groq's free tier has per-minute request and token caps. The retry logic handles transient rate-limit errors, but sustained high-volume usage requires a paid plan.
+9. **Groq rate limits:** Groq's free tier has per-minute request and token caps. Iteration 20 added extractor fallback to OpenAI so broad queries no longer collapse to zero rows, but sustained Groq throttling now shows up as higher latency and higher secondary-provider cost instead of empty output.
 
 10. **Llama JSON reliability:** Llama 3.3 models occasionally wrap valid JSON in markdown code fences even with `json_object` response format. The `_extract_json()` fallback handles this, but very complex schemas may still produce parse failures more often than GPT-4o-mini.
 
 11. **Frontend source classification drift:** The UI trust badges classify source URLs using domain sets that mirror `source_quality.py`. If the backend domain lists are updated without updating the JS, the UI badges may disagree with backend scoring. This is informational only — the backend scoring is what matters for ranking.
 
 12. **Model deprecation risk:** Groq (and other providers) can decommission models without notice. The system detects the downstream symptom (0 entities from many pages) via the safeguard log, but does not detect the upstream cause (`model_decommissioned` error code) specifically. A future improvement could validate the model on startup or detect the specific error code in `chat_json()` and raise a non-swallowable error.
+
+13. **Silent planner fallback:** `plan_schema()` catches all exceptions from LLM schema inference and falls back to a generic plan. This is intentional for resilience, but it masks permanent configuration errors (e.g., Iteration 19's required-field bug ran silently for an unknown number of queries). The fallback only logs at WARNING and does not currently surface structured planner-fallback metadata to the client.

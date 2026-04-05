@@ -51,7 +51,7 @@ class SearchFacet(BaseModel):
 class PlannerOutput(BaseModel):
     entity_type: str
     columns: List[str]                 # always starts with "name"; max 8
-    search_angles: List[str]           # derived from facets; max 5 (backward compat)
+    search_angles: List[str] = Field(default_factory=list)  # derived from facets post-validation
     facets: List[SearchFacet] = Field(default_factory=list)
 
 
@@ -123,6 +123,7 @@ class SearchMetadata(BaseModel):
     entities_after_merge: int
     gap_fill_used: bool
     duration_seconds: float
+    pipeline_counts: Dict[str, int] = Field(default_factory=dict)
 
 
 class SearchResponse(BaseModel):

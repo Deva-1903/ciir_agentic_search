@@ -13,6 +13,7 @@ is simply the list of facet queries.
 
 from __future__ import annotations
 
+from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.models.schema import PlannerOutput, SearchFacet
 from app.services.llm import chat_json_validated
@@ -103,12 +104,14 @@ async def plan_schema(query: str) -> PlannerOutput:
     """Return a facet-typed schema plan for the given user query."""
     log.info("Planning schema for query: %r", query)
     try:
+        settings = get_settings()
         result = await chat_json_validated(
             _SYSTEM,
             _USER_TEMPLATE.format(query=query),
             PlannerOutput,
             temperature=0.3,
             max_tokens=768,
+            provider=settings.planner_provider,
         )
     except Exception as exc:
         log.warning("Planner LLM call failed (%s), using fallback plan.", exc)

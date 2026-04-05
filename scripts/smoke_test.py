@@ -36,6 +36,9 @@ def main():
                       f"entities_after_merge={meta.get('entities_after_merge')} "
                       f"gap_fill={meta.get('gap_fill_used')} "
                       f"duration={meta.get('duration_seconds')}")
+                counts = meta.get("pipeline_counts") or {}
+                if counts:
+                    print(f"  COUNTS: {json.dumps(counts, sort_keys=True)}")
                 if rows:
                     for ri, row in enumerate(rows[:3]):
                         print(f"  Row {ri}: entity_id={row.get('entity_id')} "

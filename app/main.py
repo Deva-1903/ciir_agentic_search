@@ -28,8 +28,14 @@ BASE_DIR = Path(__file__).parent.parent
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
-    log.info("Starting AgenticSearch  env=%s  llm=%s  model=%s",
-             settings.app_env, settings.llm_provider, settings.active_model)
+    _, planner_model, _ = settings.provider_config(settings.planner_provider)
+    _, extractor_model, _ = settings.provider_config(settings.extractor_provider)
+    log.info(
+        "Starting AgenticSearch  env=%s  planner=%s/%s  extractor=%s/%s",
+        settings.app_env,
+        settings.planner_provider, planner_model,
+        settings.extractor_provider, extractor_model,
+    )
     await init_db()
     yield
     log.info("Shutting down")

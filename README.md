@@ -51,7 +51,7 @@ Query
        ▼
 ┌─────────────┐
 │  Extractor  │  LLM extraction per page + field validation at cell boundary
-└──────┬──────┘  Returns: entity_name + cells + evidence_snippet + confidence
+└──────┬──────┘  Retries on a secondary provider if the primary extractor fails
        │
        ▼
 ┌─────────────┐
@@ -89,7 +89,7 @@ Query
 └──────┬──────┘
        │
        ▼
-  Structured JSON response + interactive UI table
+  Structured JSON response + interactive UI table + debug metadata
 ```
 
 ### Module map
@@ -106,11 +106,11 @@ app/
     schema.py          # Pydantic models for every pipeline stage
     db.py              # SQLite async layer (aiosqlite)
   services/
-    llm.py             # LLM client (Groq primary, OpenAI fallback) + retry logic
+    llm.py             # LLM client wrapper — dual-provider (OpenAI + Groq) with per-stage routing
     planner.py         # Schema planning prompt
     brave_search.py    # Brave Search API, parallel async
     scraper.py         # Async fetcher + trafilatura/BS4
-    extractor.py       # LLM extraction with chunking
+    extractor.py       # LLM extraction with chunking + provider fallback
     merger.py          # Fuzzy entity merge
     reranker.py        # Cross-encoder reranking (+ Jaccard fallback)
     ranker.py          # Scoring, ranking, and row pruning
@@ -130,13 +130,13 @@ templates/
 static/
   app.js               # Vanilla JS: polling, phase tracker, panels, table with trust badges, modal
   style.css            # Dark theme, responsive, pipeline tracker, badge system
-tests/                 # pytest test suite (129 tests)
+tests/                 # pytest test suite (142 tests)
 scripts/
   eval.py              # Evaluation harness (CLI)
 docs/
-  BUILD_JOURNAL.md     # Full development journal (11 iterations)
+  BUILD_JOURNAL.md     # Full development journal (20 iterations)
   eval_queries.json    # Eval query set (10 queries, 3 categories)
-data/                  # SQLite database + eval reports (created at runtime)
+data/                  # Eval reports (created at runtime)
 ```
 
 ---
@@ -228,19 +228,21 @@ Copy `.env.example` to `.env` and fill in your keys:
 cp .env.example .env
 ```
 
-| Variable          | Required | Description                                                |
-| ----------------- | -------- | ---------------------------------------------------------- |
-| `BRAVE_API_KEY`   | ✅       | From [brave.com/search/api](https://brave.com/search/api/) |
-| `GROQ_API_KEY`    | ✅\*     | Groq API key (primary LLM provider)                        |
-| `GROQ_MODEL`      | optional | Default: `llama-3.1-70b-versatile`                         |
-| `GROQ_BASE_URL`   | optional | Default: `https://api.groq.com/openai/v1`                  |
-| `OPENAI_API_KEY`  | fallback | Used only when `GROQ_API_KEY` is empty                     |
-| `OPENAI_MODEL`    | optional | Default: `gpt-4o-mini`                                     |
-| `OPENAI_BASE_URL` | optional | For non-OpenAI providers                                   |
-| `APP_ENV`         | optional | `development` or `production`                              |
-| `LOG_LEVEL`       | optional | `INFO` (default) or `DEBUG`                                |
+| Variable             | Required | Description                                                |
+| -------------------- | -------- | ---------------------------------------------------------- |
+| `BRAVE_API_KEY`      | ✅       | From [brave.com/search/api](https://brave.com/search/api/) |
+| `OPENAI_API_KEY`     | ✅       | OpenAI API key (used for planning)                         |
+| `OPENAI_MODEL`       | optional | Default: `gpt-4o-mini`                                     |
+| `GROQ_API_KEY`       | ✅       | Groq API key (used for extraction)                         |
+| `GROQ_MODEL`         | optional | Default: `llama-3.3-70b-versatile`                         |
+| `GROQ_BASE_URL`      | optional | Default: `https://api.groq.com/openai/v1`                  |
+| `PLANNER_PROVIDER`   | optional | Default: `openai` — which provider the planner uses        |
+| `EXTRACTOR_PROVIDER` | optional | Default: `groq` — which provider the extractor uses        |
+| `OPENAI_BASE_URL`    | optional | For non-OpenAI providers                                   |
+| `APP_ENV`            | optional | `development` or `production`                              |
+| `LOG_LEVEL`          | optional | `INFO` (default) or `DEBUG`                                |
 
-\* If `GROQ_API_KEY` is set, Groq is used as the LLM provider. If empty, the system falls back to OpenAI. Both use the same OpenAI-compatible client internally.
+The system uses a **split-provider** model: OpenAI handles schema planning (higher reliability for structured reasoning) while Groq handles entity extraction (faster inference for bulk page processing). Both providers use the same OpenAI-compatible client internally. If the primary extractor provider fails and another configured provider is available, extraction retries on the secondary provider instead of silently returning zero entities.
 
 ---
 
@@ -254,7 +256,7 @@ uvicorn app.main:app --reload --port 8000
 
 Open [http://localhost:8000](http://localhost:8000) in your browser.
 
-The SQLite database is created automatically at `data/agentic_search.db` on first run.
+The SQLite job/cache database is created automatically at `/tmp/agentic_search.db` on first run. Evaluation reports are still written under `data/`.
 
 ### Tests
 
@@ -341,11 +343,23 @@ Poll for job status. When `status = "done"`, the full result is included.
       "urls_considered": 24,
       "pages_scraped": 15,
       "pages_after_rerank": 10,
-      "rerank_scorer": "cross-encoder",
+      "rerank_scorer": "cross_encoder",
       "entities_extracted": 42,
       "entities_after_merge": 11,
       "gap_fill_used": true,
-      "duration_seconds": 18.2
+      "duration_seconds": 18.2,
+      "pipeline_counts": {
+        "search_angles": 5,
+        "search_facets": 5,
+        "urls_after_dedupe": 24,
+        "pages_scraped": 15,
+        "pages_after_rerank": 10,
+        "extraction_calls": 18,
+        "entities_before_merge": 42,
+        "rows_after_merge": 14,
+        "rows_after_verifier": 11,
+        "final_rows": 11
+      }
     }
   }
 }
@@ -378,6 +392,8 @@ Returns `{ "status": "ok" }`.
 
 **Text chunking, not summarization**: Long pages are chunked and each chunk is extracted independently, then merged. This preserves faithful evidence snippets; summarization would lose verbatim quotes.
 
+**Extractor provider fallback**: Broad discovery queries should not collapse to zero rows just because one extraction provider is rate-limited. The extractor tries the configured primary provider first and retries on a configured secondary provider when needed. This favors correctness over minimum latency.
+
 **Ranker design**: The ranking formula is a weighted sum of six interpretable signals: completeness (0.25), average confidence (0.20), source quality (0.32), source support (0.08), actionable-field bonus (0.07), and source diversity (0.08). Source quality dominates by design. More complex ranking (BM25 against query, embedding similarity) was intentionally omitted — the signals are already well-correlated with quality and remain fully explainable.
 
 ---
@@ -386,8 +402,8 @@ Returns `{ "status": "ok" }`.
 
 - **LLM hallucination**: Despite strong prompt constraints, the extractor may occasionally assign `confidence > 0` to values weakly implied by context. The evidence snippet requirement and cell-level verification reduce this but do not eliminate it.
 - **Dynamic pages**: JavaScript-rendered pages (SPAs) are not scraped; the system fetches static HTML only. This misses some sources.
-- **Rate limits**: Running many queries quickly may hit Brave API rate limits (depends on your plan).
-- **Latency**: A typical query takes 15–45 seconds with Groq (25–60s with OpenAI) depending on page count, reranking, and LLM speed. The cross-encoder adds ~1-2s; gap-fill adds 10–20s.
+- **Rate limits**: Running many queries quickly may hit Brave or Groq rate limits (depends on your plan). When Groq throttles, extraction can fall back to OpenAI if configured, which preserves results but increases latency and cost.
+- **Latency**: A typical query takes 15–45 seconds with Groq extraction (25–60s with OpenAI extraction) depending on page count, reranking, and LLM speed. The cross-encoder adds ~1-2s; gap-fill adds 10–20s. Extractor fallback during provider throttling can push latency higher.
 - **Schema quality**: Typed facets improved planner output, but very broad queries still occasionally produce generic columns.
 - **Cell verifier false matches**: Short entity names (e.g. "Joe's") can fuzzy-match against unrelated evidence. The 80-threshold partial_ratio mitigates but does not eliminate this.
 - **Source domain calibration**: `source_quality.py` is calibrated for food/startup queries. Medical, legal, and academic domains get a neutral `unknown` score (0.55).
@@ -407,13 +423,13 @@ Returns `{ "status": "ok" }`.
 
 ## Latency and cost
 
-With Groq (`llama-3.1-70b-versatile`) and 15 scraped pages:
+With the default split-provider setup (`gpt-4o-mini` planner + `llama-3.3-70b-versatile` extractor) and 15 scraped pages:
 
-- Planner: ~0.3–0.5s (Groq inference is fast)
+- Planner: ~0.3–1.0s
 - Extractor: ~0.5–1.5s per page, ~1500 tokens per chunk — the dominant cost
 - Gap-fill: adds ~5–15s and 2–4 extra LLM calls for sparse rows
 
-Groq provides significantly faster inference than hosted OpenAI models. Estimated token cost per query: **~30k–80k tokens**. Groq's free tier may apply rate limits; the retry logic in `llm.py` handles transient rate-limit errors.
+Groq provides significantly faster extraction inference than hosted OpenAI models, but its free tier may apply stricter rate limits. Estimated token cost per query is still **~30k–80k tokens**. When extractor fallback to OpenAI is triggered, total latency and spend rise, but broad queries continue to return rows instead of failing closed with empty output.
 
 With OpenAI fallback (`gpt-4o-mini`): similar token counts, ~$0.01–$0.03 per query.
 
@@ -495,7 +511,7 @@ The UI is intentionally a single-page Jinja2 template with vanilla JS — no fra
 
 **Trust badges on rows:** Each row in the results table shows badges for sources count, confidence tier (high/medium/low), and source type diversity (official, editorial, directory, marketplace). Rows with only a single source get a warning badge. These are computed from the actual cell data — source URLs are classified against the same domain lists used by `source_quality.py`.
 
-**Run stats panel:** A compact stats table showing URLs considered, pages scraped, pages after reranking, entities extracted, entities after merge, gap-fill usage, and total duration. All numbers come from `SearchMetadata`.
+**Run stats panel:** A compact stats table showing URLs considered, pages scraped, pages after reranking, entities extracted, entities after merge, gap-fill usage, and total duration. The backend also exposes deeper per-stage counters in `SearchMetadata.pipeline_counts` for debugging pipeline collapses.
 
 **Enhanced evidence modal:** Clicking a cell opens a modal with the cell value, confidence bar, verbatim evidence snippet, source URL (linked), source title, and a source-type badge. Validation flags (low confidence, single source) appear when applicable.
 

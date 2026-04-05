@@ -7,6 +7,7 @@ let currentJobId = null;
 let pollTimer = null;
 let pipelineStartTime = null;
 let elapsedTimer = null;
+let currentQuery = "";
 
 // ── DOM refs ───────────────────────────────────────────────────────────────
 const form = document.getElementById("search-form");
@@ -18,6 +19,8 @@ const elapsedLabel = document.getElementById("elapsed-label");
 const errorBanner = document.getElementById("error-banner");
 const errorMsg = document.getElementById("error-msg");
 const noResultsBanner = document.getElementById("no-results-banner");
+const noResultsQuery = document.getElementById("no-results-query");
+const pipelineQuery = document.getElementById("pipeline-query");
 const resultsSec = document.getElementById("results-section");
 const emptyState = document.getElementById("empty-state");
 const tableHead = document.getElementById("table-head");
@@ -26,6 +29,7 @@ const exportJson = document.getElementById("btn-export-json");
 const exportCsv = document.getElementById("btn-export-csv");
 
 // Summary strip
+const sumQuery = document.getElementById("sum-query");
 const sumEntityType = document.getElementById("sum-entity-type");
 const sumRows = document.getElementById("sum-rows");
 const sumSources = document.getElementById("sum-sources");
@@ -221,6 +225,8 @@ form.addEventListener("submit", async (e) => {
   const query = queryInput.value.trim();
   if (!query) return;
 
+  currentQuery = query;
+
   if (pollTimer) clearInterval(pollTimer);
   stopElapsedTimer();
   currentJobId = null;
@@ -230,6 +236,7 @@ form.addEventListener("submit", async (e) => {
   hide(emptyState);
   hide(noResultsBanner);
   show(tracker);
+  pipelineQuery.textContent = `\u201c${query}\u201d`;
   searchBtn.disabled = true;
   updatePipelineTracker("pending");
   startElapsedTimer();
@@ -294,6 +301,9 @@ async function pollJob() {
       if (job.result && job.result.rows && job.result.rows.length > 0) {
         renderResults(job.result);
       } else {
+        noResultsQuery.textContent = currentQuery
+          ? `Query: \u201c${currentQuery}\u201d`
+          : "";
         show(noResultsBanner);
       }
     } else if (job.status === "failed") {
@@ -326,13 +336,14 @@ function renderResults(data) {
   const m = data.metadata;
 
   // ── Summary strip ──
+  sumQuery.textContent = currentQuery;
   sumEntityType.textContent = data.entity_type;
   sumRows.textContent = data.rows.length;
   sumSources.textContent = m.urls_considered;
   sumScraped.textContent = m.pages_scraped;
   sumExtracted.textContent = m.pages_after_rerank || m.pages_scraped;
-  sumGapfill.textContent = m.gap_fill_used ? "Gap-fill: yes" : "Gap-fill: no";
-  sumDuration.textContent = `${m.duration_seconds}s`;
+  sumGapfill.textContent = m.gap_fill_used ? "gap-fill: yes" : "gap-fill: no";
+  sumDuration.textContent = `\u23f1 ${m.duration_seconds}s`;
 
   // ── Retrieval plan panel ──
   renderRetrievalPlan(data, m);
@@ -468,9 +479,129 @@ function renderRunStats(m) {
   statsBody.innerHTML = html;
 }
 
+// ── Column type classifier for smart sizing ──────────────────────────────
+// ── Column priority map ────────────────────────────────────────────────────
+const COL_PRIORITY = {
+  // Highest — always visible, gets most space
+  name: 0,
+  entity_name: 0,
+  company: 0,
+  title: 0,
+  // High — important structured fields
+  website: 1,
+  address: 1,
+  headquarters: 1,
+  location: 1,
+  focus_area: 1,
+  funding_stage: 1,
+  rating: 1,
+  cuisine: 1,
+  type: 1,
+  // Medium — useful but narrower
+  price_range: 2,
+  neighborhood: 2,
+  category: 2,
+  investors: 2,
+  phone_number: 2,
+  phone: 2,
+  founded: 2,
+  year_founded: 2,
+  employees: 2,
+  email: 2,
+  ceo: 2,
+  founder: 2,
+  // Low — long text fields that can compress
+  description: 3,
+  summary: 3,
+  overview: 3,
+  bio: 3,
+  notable_claim: 3,
+  notes: 3,
+  details: 3,
+  about: 3,
+};
+
+function colPriority(col) {
+  const c = col.toLowerCase();
+  if (COL_PRIORITY[c] !== undefined) return COL_PRIORITY[c];
+  if (c.endsWith("_url") || c === "url" || c === "homepage" || c === "link")
+    return 1;
+  if (c.includes("description") || c.includes("summary") || c.includes("note"))
+    return 3;
+  return 2;
+}
+
+function colPriorityClass(col) {
+  const p = colPriority(col);
+  return (
+    ["col-pri-highest", "col-pri-high", "col-pri-medium", "col-pri-low"][p] ||
+    "col-pri-medium"
+  );
+}
+
+function isUrlColumn(col) {
+  const c = col.toLowerCase();
+  return (
+    c === "url" ||
+    c === "website" ||
+    c === "homepage" ||
+    c === "link" ||
+    c.endsWith("_url")
+  );
+}
+
+function isLongTextColumn(col) {
+  return colPriority(col) === 3;
+}
+
+function sortColumnsByPriority(cols) {
+  return [...cols].sort((a, b) => colPriority(a) - colPriority(b));
+}
+
+function truncateUrl(url, maxLen) {
+  try {
+    const u = new URL(url);
+    const display = u.hostname.replace(/^www\./, "") + u.pathname;
+    return display.length > maxLen
+      ? display.slice(0, maxLen - 1) + "\u2026"
+      : display;
+  } catch {
+    return url.length > maxLen ? url.slice(0, maxLen - 1) + "\u2026" : url;
+  }
+}
+
+// View mode state
+let _viewCompact = false;
+
+function toggleViewMode() {
+  _viewCompact = !_viewCompact;
+  const table = document.getElementById("results-table");
+  const btn = document.getElementById("btn-view-toggle");
+  if (_viewCompact) {
+    table.classList.add("table-compact");
+    btn.textContent = "\u229e Full view";
+  } else {
+    table.classList.remove("table-compact");
+    btn.textContent = "\u229f Compact";
+  }
+}
+
 // ── Table rendering ───────────────────────────────────────────────────────
 function renderTable(data) {
-  const cols = data.columns;
+  const rawCols = data.columns;
+  const cols = sortColumnsByPriority(rawCols);
+  const isWide = cols.length > 6;
+  const table = document.getElementById("results-table");
+
+  // Mark wide schemas
+  table.classList.toggle("wide-schema", isWide);
+  table.classList.remove("table-compact");
+  _viewCompact = false;
+  const toggleBtn = document.getElementById("btn-view-toggle");
+  if (toggleBtn) {
+    toggleBtn.textContent = "\u229f Compact";
+    toggleBtn.style.display = cols.length > 4 ? "" : "none";
+  }
 
   // Header
   tableHead.innerHTML = "";
@@ -482,6 +613,8 @@ function renderTable(data) {
   cols.forEach((col) => {
     const th = document.createElement("th");
     th.textContent = humanColumn(col);
+    th.className = colPriorityClass(col);
+    th.dataset.col = col;
     headTr.appendChild(th);
   });
   const thTrust = document.createElement("th");
@@ -505,14 +638,26 @@ function renderTable(data) {
     cols.forEach((col) => {
       const td = document.createElement("td");
       const cell = row.cells[col];
+      const priClass = colPriorityClass(col);
+      td.dataset.col = col;
 
       if (cell && cell.value) {
-        td.className = "cell-filled";
+        td.className = `cell-filled ${priClass}`;
         td.title = "Click to view evidence";
 
         const span = document.createElement("span");
-        span.className = "cell-value";
-        span.textContent = cell.value;
+
+        if (isUrlColumn(col)) {
+          span.className = "cell-value cell-url";
+          span.textContent = truncateUrl(cell.value, 40);
+          td.title = cell.value;
+        } else if (isLongTextColumn(col)) {
+          span.className = "cell-value cell-text-clamp";
+          span.textContent = cell.value;
+        } else {
+          span.className = "cell-value";
+          span.textContent = cell.value;
+        }
 
         const dot = document.createElement("span");
         dot.className = `conf-dot ${confClass(cell.confidence)}`;
@@ -523,7 +668,7 @@ function renderTable(data) {
 
         td.addEventListener("click", () => openModal(col, cell, row));
       } else {
-        td.className = "cell-empty";
+        td.className = `cell-empty ${priClass}`;
         td.textContent = "—";
       }
 
@@ -591,7 +736,7 @@ function buildTrustBadges(row) {
 function openModal(col, cell, row) {
   modalColLabel.textContent = humanColumn(col);
   modalValue.textContent = cell.value;
-  modalConf.textContent = `${Math.round(cell.confidence * 100)}% confidence`;
+  modalConf.textContent = `${Math.round(cell.confidence * 100)}%`;
   modalConf.className = `modal__conf ${confClass(cell.confidence)}`;
   modalSnippet.textContent = cell.evidence_snippet || "(no snippet)";
   modalSourceUrl.textContent = cell.source_url || "";

@@ -25,27 +25,42 @@ from app.core.logging import get_logger
 
 log = get_logger(__name__)
 
-# ── Client singleton ──────────────────────────────────────────────────────────
+# ── Client pool (one per provider) ────────────────────────────────────────────
 
-_client: Optional[AsyncOpenAI] = None
+_clients: dict[str, AsyncOpenAI] = {}
 
 
-def _get_client() -> AsyncOpenAI:
-    global _client
-    if _client is None:
-        settings = get_settings()
+def _get_client(provider: str | None = None) -> tuple[AsyncOpenAI, str]:
+    """Return (client, model) for *provider*.
+
+    If *provider* is ``None`` the legacy ``active_*`` config is used (backward
+    compat for callers that haven't been updated yet).
+    """
+    settings = get_settings()
+
+    if provider is None:
+        # Legacy single-provider path
+        api_key = settings.active_api_key
+        model = settings.active_model
+        base_url = settings.active_base_url
+        cache_key = f"__legacy_{settings.llm_provider}"
+    else:
+        api_key, model, base_url = settings.provider_config(provider)
+        cache_key = provider
+
+    if cache_key not in _clients:
         kwargs: dict = {
-            "api_key": settings.active_api_key,
-            "timeout": 60.0,   # hard 60s per call — no silent hangs
-            "max_retries": 0,  # retries are handled explicitly in chat_json
+            "api_key": api_key,
+            "timeout": 60.0,
+            "max_retries": 0,
         }
-        if settings.active_base_url:
-            kwargs["base_url"] = settings.active_base_url
-        log.info("LLM client: provider=%s  model=%s  base_url=%s",
-                 settings.llm_provider, settings.active_model,
-                 settings.active_base_url or "(default)")
-        _client = AsyncOpenAI(**kwargs)
-    return _client
+        if base_url:
+            kwargs["base_url"] = base_url
+        log.info("LLM client [%s]: model=%s  base_url=%s",
+                 cache_key, model, base_url or "(default)")
+        _clients[cache_key] = AsyncOpenAI(**kwargs)
+
+    return _clients[cache_key], model
 
 
 def _extract_json(raw: str) -> dict[str, Any]:
@@ -76,21 +91,24 @@ async def chat_json(
     max_tokens: int = 4096,
     timeout: float | None = None,
     attempts: int = 3,
+    provider: str | None = None,
 ) -> dict[str, Any]:
     """
     Call the LLM in JSON mode. Returns the parsed dict.
     Raises ValueError if the response cannot be parsed as JSON.
+
+    *provider* selects the client/model pair (``"openai"`` or ``"groq"``).
+    When ``None`` the legacy single-provider path is used.
     """
     if attempts < 1:
         raise ValueError("attempts must be >= 1")
 
-    client = _get_client()
+    client, model = _get_client(provider)
 
     for attempt in range(1, attempts + 1):
         try:
-            settings = get_settings()
             response = await client.chat.completions.create(
-                model=settings.active_model,
+                model=model,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 response_format={"type": "json_object"},
@@ -134,6 +152,7 @@ async def chat_json_validated(
     max_tokens: int = 4096,
     timeout: float | None = None,
     attempts: int = 3,
+    provider: str | None = None,
 ) -> BaseModel:
     """
     Like chat_json but also validates against a Pydantic model.
@@ -146,5 +165,6 @@ async def chat_json_validated(
         max_tokens=max_tokens,
         timeout=timeout,
         attempts=attempts,
+        provider=provider,
     )
     return model_class.model_validate(raw)

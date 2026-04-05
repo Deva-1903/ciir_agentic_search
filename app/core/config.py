@@ -20,10 +20,14 @@ class Settings(BaseSettings):
     openai_model: str = "gpt-4o-mini"
     openai_base_url: Optional[str] = None  # None → use default OpenAI URL
 
-    # Groq (primary LLM provider — OpenAI-compatible API)
+    # Groq (fast extraction via OpenAI-compatible API)
     groq_api_key: str = ""
     groq_model: str = "llama-3.3-70b-versatile"
     groq_base_url: str = "https://api.groq.com/openai/v1"
+
+    # Provider routing — which provider each pipeline stage uses
+    planner_provider: str = "openai"
+    extractor_provider: str = "groq"
 
     # App
     app_env: str = "development"
@@ -74,6 +78,12 @@ class Settings(BaseSettings):
         if self.groq_api_key:
             return self.groq_base_url
         return self.openai_base_url
+
+    def provider_config(self, provider: str) -> tuple[str, str, str | None]:
+        """Return (api_key, model, base_url) for the named provider."""
+        if provider == "groq":
+            return self.groq_api_key, self.groq_model, self.groq_base_url
+        return self.openai_api_key, self.openai_model, self.openai_base_url
 
 
 @lru_cache(maxsize=1)
