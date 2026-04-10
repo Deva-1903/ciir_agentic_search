@@ -74,6 +74,8 @@ def _cleanup_punctuation(query: str) -> str:
 
 
 def _tokenize(query: str) -> list[str]:
+    # it keeps apostrophes in contractions like "don't",
+    # keeps commas as separate tokens (for location phrases like "Brooklyn, NY"), and discards everything else.
     return re.findall(r"[A-Za-z]+(?:'[A-Za-z]+)?|[0-9]+|[,]", query)
 
 
@@ -101,6 +103,8 @@ def _maybe_fix_location_token(
         return token
 
     choices = {term.lower(): term for term in _KNOWN_LOCATION_TERMS if " " not in term}
+    # more shared character structure = higher score
+    # more different ordering / missing chars = lower score
     match = difflib.get_close_matches(low, list(choices.keys()), n=1, cutoff=0.84)
     if match:
         return choices[match[0]]
@@ -136,7 +140,9 @@ def normalize_query(query: str) -> NormalizedQuery:
     if not cleaned:
         return NormalizedQuery(original_query=original, normalized_query=original)
 
+    # splits into a flat list of tokens — words, numbers, and commas only. Drops everything else.   
     raw_tokens = _tokenize(cleaned)
+    # output - ["best", "pizza", "places", "in", "brookln", "ny"]
     normalized_tokens: list[str] = []
     for idx, token in enumerate(raw_tokens):
         if token == ",":
