@@ -38,11 +38,18 @@ The pipeline is a linear sequence of async stages, each feeding the next. Unders
 
 ### Stage 1 — Query normalization (`query_normalizer.py`)
 
-**What it does**: light cleanup before retrieval. Strips filler like "give me" or "find me", normalizes casing, removes redundant punctuation.
+**What it does**: conservative rule-based cleanup before retrieval:
+- Punctuation normalization (collapses `!!` → `?`, multiple spaces, trims trailing punctuation)
+- Hardcoded typo correction for common misspellings (`"restraunts"` → `"restaurants"`, `"brookln"` → `"Brooklyn"`)
+- Fuzzy location correction — only when a token follows a location preposition ("in", "near", "at") and fuzzy-matches a known location term at ≥84% similarity
+- State abbreviation casing (`"ny"` → `"NY"`)
+- Proper-casing of known location names (`"new york"` → `"New York"`)
 
-**Why**: LLMs and search APIs are sensitive to query phrasing. A query like `"Can you find me the best startups"` should retrieve the same results as `"best startups"`. This normalization happens before the plan is built.
+It does **not** strip conversational filler like "give me" or "find me". Those pass through unmodified to the planner.
 
-**Current limitation**: it's rule-based, not semantic. Synonyms aren't resolved. `"VC-backed companies"` and `"venture-funded startups"` take different paths.
+**Why so conservative**: more aggressive normalization risks changing query intent. Stripping "find me the best" could accidentally remove "best" which the planner uses to detect strict queries and set row caps.
+
+**Current limitation**: it's entirely rule-based. Synonyms aren't resolved. `"VC-backed companies"` and `"venture-funded startups"` take different paths through the planner. The typo list is manually maintained and has obvious gaps (only ~20 entries).
 
 ---
 
@@ -113,11 +120,13 @@ This label is used downstream to route extraction (deterministic vs. LLM), weigh
 
 ### Stage 5 — Reranking (`reranker.py`)
 
-**What it does**: if more pages were scraped than the extraction budget allows (configurable, default 10), a cross-encoder model (`ms-marco-MiniLM-L-6-v2`) scores each page against the original query and selects the top-K most relevant.
+**What it does**: if more pages were scraped than the extraction budget allows (configurable, default `rerank_top_k: 10`), a cross-encoder model (`cross-encoder/ms-marco-MiniLM-L-6-v2`) scores each page against the original query and selects the top-K most relevant. Each page is represented by its title + first 1,200 characters of body text.
+
+**Fallback**: if `sentence-transformers` is not installed or the model fails to load, the reranker falls back to a lexical Jaccard overlap score (query token recall in the document). The pipeline stays functional in constrained environments.
 
 **Why**: LLM extraction is expensive. If you scraped 20 pages but only have budget to send 10 to the LLM, you want to send the 10 most relevant — not the first 10 by URL order. The cross-encoder gives a semantically grounded relevance score that's much better than BM25 or simple keyword overlap.
 
-**Why a cross-encoder, not a bi-encoder**: bi-encoders (embedding similarity) are fast but produce coarse relevance scores. Cross-encoders are slower but evaluate the query-document pair jointly, giving better ranking precision. At 20 pages with ~500 tokens each, the latency is acceptable.
+**Why a cross-encoder, not a bi-encoder**: bi-encoders (embedding similarity) are fast but produce coarse relevance scores. Cross-encoders are slower but evaluate the query-document pair jointly, giving better ranking precision. At 20 pages scored against 1,200 chars each, the CPU latency is acceptable (~20–80ms per pair).
 
 ---
 
@@ -158,7 +167,7 @@ When merging cells for the same column, the cell with higher confidence wins (wi
 **Acceptance criteria**:
 - The entity name must appear in the page title or first 200 chars of body
 - The page must not be a directory/listing/marketplace page (regime filter)
-- Score must exceed 0.7 (base quality + bonuses for shallow path, official-hint words in title)
+- Score must be ≥ 0.7 (base quality + bonuses for shallow path, official-hint words in title/path)
 - The page must be from a non-editorial, non-marketplace source
 
 **Why this is hard**: a page about "Best Pizza in Brooklyn" mentions 8 restaurant names in the first 200 chars. Without tight entity-name matching, the wrong restaurant's homepage gets attached. The 200-char window (tightened from 500 in this last pass) reduces this.
@@ -171,7 +180,7 @@ When merging cells for the same column, the cell with higher confidence wins (wi
 
 **Why a separate fill pass**: discovery extraction from list/editorial pages gives you entity names and light attributes. But fields like `license`, `headquarters`, `phone_number` are rarely on list pages — they're on the entity's own page or a structured directory. A second targeted pass for sparse rows dramatically improves fill rate without blowing up the discovery budget.
 
-**Bounds**: hardcoded at ≤5 entities, ≤2 URLs per entity, 1 round. This prevents the system from spending unbounded time on gap-filling. In production, these would be configurable per query type or per time budget.
+**Bounds**: configurable — `gap_fill_max_entities` (default 5) and `gap_fill_max_urls_per_entity` (default 2), 1 round only. These settings prevent unbounded gap-fill cost. In production, they could be driven dynamically by a per-query time budget rather than fixed counts.
 
 ---
 
@@ -213,7 +222,7 @@ The 12 dimensions:
 | `avg_confidence` | 0.16 | Mean confidence of all cells |
 | `local_fit` | 0.08 | Location match between row and query location phrase |
 | `source_support` | 0.06 | log₂(1 + sources_count) — multi-source bonus |
-| `source_diversity` | 0.05–0.08 | Fraction of cells from distinct domains |
+| `source_diversity` | 0.08 | Fraction of cells from distinct domains (configurable via `source_diversity_weight`) |
 | `actionable` | 0.05 | Has at least one non-weak-signal column filled |
 | `reputation` | 0.04 | Proxy from source diversity + rating fields |
 | `freshness` | 0.04 | Year mentions in source URLs/titles |
@@ -351,7 +360,7 @@ The 12 dimensions:
 
 ### 4g. Evaluation harness is unlabeled
 
-**Current state**: `eval.py` uses proxy metrics (fill rate, official-site rate, multi-source rate). The labeled set (`eval_labeled_queries.json`) has only ~10 queries with expected entity lists.
+**Current state**: `eval.py` uses proxy metrics (fill rate, official-site rate, multi-source rate). The labeled set (`eval_labeled_queries.json`) has only 4 queries with expected entity lists.
 
 **Problem**: you can't confidently say "the filtering changes made quality better" without precision/recall measurements over a held-out set. Proxy metrics can all improve while output quality gets worse (e.g., fewer rows with higher fill rate but wrong entities).
 
@@ -422,11 +431,11 @@ This is the most subtle section. Many choices that feel architectural are actual
 
 ### 6a. The "website" column assumption
 
-**Where it appears**: merger, official_site, field_validator, cell_verifier, ranker, gap_fill — all have a hardcoded list of `_WEBSITE_COLS` (`"website"`, `"url"`, `"homepage"`, `"website_or_repo"`, `"website_or_profile"`, `"site"`).
+**Where it appears**: 8 files define their own version of this list — `official_site.py`, `cell_verifier.py`, `field_validator.py`, `merger.py` (inline in two functions), `extractor.py`, `source_quality.py`, `planner.py`, and `deterministic_extractors.py` all have hardcoded sequences of `"website"`, `"url"`, `"homepage"`, `"website_or_repo"`, `"website_or_profile"`, `"site"`. `verifier.py` is the notable exception — it accesses only `"website"` directly.
 
 **Why it's a problem**: this is a reasonable generalization — every entity has some canonical online presence. But for a `person_group` query, the canonical presence might be a LinkedIn profile or an academic publication list. For `software_project`, it's a GitHub repo URL. The column name is different but the concept is the same: "the authoritative URL for this entity."
 
-**How to generalize**: define a `canonical_url_semantics` tag on schema columns at the family level. The official-site resolver, ranker, and merger would query by semantic tag rather than column name. This avoids duplicating the `_WEBSITE_COLS` set across 6 files.
+**How to generalize**: define a `canonical_url_semantics` tag on schema columns at the family level. The official-site resolver, ranker, and merger would query by semantic tag rather than column name. This avoids duplicating the website-column list across 8 files.
 
 ---
 
@@ -482,7 +491,7 @@ The deterministic extractors can still specialize on GitHub vs. npm vs. PyPI —
 
 | Current pattern | Files affected | Better approach |
 |---|---|---|
-| `_WEBSITE_COLS` sets duplicated across 6 files | merger, official_site, verifier, cell_verifier, field_validator, gap_fill | Column semantic tags on schema templates |
+| `_WEBSITE_COLS` lists duplicated across 8 files | official_site, cell_verifier, field_validator, merger, extractor, source_quality, planner, deterministic_extractors | Column semantic tags on schema templates |
 | Location column hardcoded to `location`/`address`/`headquarters` | ranker, verifier, gap_fill | Location semantic tag |
 | `_PSEUDO_ENTITY_FAMILY_TERMS` duplicates signal lists | verifier, planner | Reuse planner signal lists for pseudo-entity detection |
 | `local_business_listing` regime is Yelp/Maps specific | evidence_regimes, deterministic_extractors | Replace with `structured_entity_page` (schema.org-based) |
