@@ -1196,6 +1196,96 @@ Next step: Improve canonical-domain recall without weakening the stricter homepa
 
 ---
 
+### Iteration 25 — Provenance-First Requirement-Aware Ranking and Transparency
+
+**Date:** 2026-04-13  
+**Author:** User (directed), Claude (implementation)  
+**Goal:** Replace the thin, binary requirement system with a full provenance-first requirement evaluation pipeline — structured typed models, three-state evaluation (satisfied / not_satisfied / unknown), evidence grounding for every judgment, hard-requirement ranking penalties, and a richer UI that shows the user exactly why each row passes or fails each constraint.
+
+**Initial assumption:**
+The prior requirement system (Iterations from the previous session) had the right skeleton — a requirement parser, a scorer, a ranker weight, and a filter bar — but was half-baked: binary True/False evaluation treated absent fields the same as failed fields, evidence was never grounded (no matched_value, no column, no snippet), requirements were thin objects with no kind/priority/is_hard, and the UI could only show ✓/✗ per requirement with no detail.
+
+**Issue discovered:**
+Queries like "AI startups in healthcare with funding > $10M" should clearly distinguish between:
+- A row that **has** a `funding` cell with value `$5M` → `not_satisfied` (clearly wrong, penalize ranking)
+- A row that **has no** `funding` cell at all → `unknown` (we can't judge, don't penalize)
+- A row that **has** `funding: $15M` → `satisfied` (clearly right, reward ranking)
+
+The old system returned False for both the first and second cases, unfairly penalizing rows just because a field was absent — a common situation in early discovery output.
+
+**What was built:**
+
+1. **Schema (`app/models/schema.py`)** — Replaced `QueryRequirement` with three new models:
+   - `RequirementSpec`: richer constraint with `id`, `label`, `kind` (categorical/location/numeric/semantic), `operator`, `target_value` (normalised), `target_value_raw`, `source_phrase`, `priority` (high/medium), `is_hard`, `mapped_columns`, `notes`.
+   - `RequirementMatch`: per-row evaluation result with `status` (satisfied/not_satisfied/unknown), `confidence`, `matched_value`, `matched_column`, `reason` (human-readable), `evidence` (source_url, source_title, evidence_snippet), `is_hard`.
+   - `RowRequirementsSummary`: row-level aggregate with counts by status, `satisfaction_ratio` (satisfied / (satisfied + not_satisfied); 1.0 when all unknown so unknown rows are not penalized), `hard_requirements_satisfied_count`, and full `matches` list.
+   - `EntityRow` now carries `requirement_summary: RowRequirementsSummary` instead of the three flat fields (`satisfied_requirements`, `unsatisfied_requirements`, `requirement_satisfaction`).
+   - Also added `RankingSignal` and `RowRankingSummary` to `EntityRow` for transparent score breakdowns.
+
+2. **Parser (`app/services/requirement_parser.py`)** — Rewrote to output `RequirementSpec`:
+   - All existing regex patterns preserved and upgraded: location, funding GT/LT, stage (first-match rule), open-source/license, founding year, employee size.
+   - Location now normalises US/USA/United States/America → `"us"`, UK/GB/United Kingdom → `"uk"`, EU countries → `"eu"`, US state abbreviations → `"us-xx"`.
+   - Added `_extract_semantic_requirements()`: detects compound modifiers before entity-type trigger words (`startup`, `company`, `platform`, `restaurant`, etc.) to produce semantic topic requirements (e.g. "search engine startups" → topic `"search engine"`). Strips qualifier words (top, best, leading) from the compound.
+   - Added `_FAMILY_COLUMN_BINDINGS` map so requirements are bound to schema-specific columns by query family (`organization_company`, `place_venue`, `software_project`, etc.) rather than generic aliases.
+   - Added `augment_plan_with_requirements()` to conservatively add missing extraction columns when a hard requirement has no home in the current schema.
+   - Added `bind_requirements_to_plan()` to map each spec to the actual schema columns post-planning.
+   - Added `prepare_requirements()` as a single pipeline entry point: parse → augment plan → bind.
+
+3. **Scorer (`app/services/requirement_scorer.py`)** — Full rewrite:
+   - `evaluate_requirement(spec, row) → RequirementMatch` with proper three-state logic.
+   - `unknown` when no relevant field is present in the row (not penalized as failure).
+   - Location evaluation: normalises both sides, splits cell values on `/|,()` to handle "New York, NY / US", accepts any US state as satisfying `target=us`.
+   - Numeric evaluation: parses money with K/M/B suffixes plus spelled-out "thousand/million/billion"; returns `None` (→ unknown) when cell text is not parseable rather than returning False.
+   - Categorical/semantic evaluation: substring match on cell value, evidence snippet, and source title for stronger grounding.
+   - `_grounded_texts()` helper inspects value, evidence_snippet, and source_title in priority order; match confidence is weighted by which source kind matched.
+   - `build_requirement_summary(specs, row) → RowRequirementsSummary` aggregates all matches into counts; `satisfaction_ratio = satisfied / (satisfied + not_satisfied)`.
+   - `attach_requirement_summaries(rows, specs)` batch attaches summaries to all rows, inserted after gap-fill and cell-verify, before final ranking.
+
+4. **Ranker (`app/services/ranker.py`)** — Updated scoring:
+   - `_requirement_score(row)`: `(sat × 1.0 + unk × 0.5 + not_sat × 0.0) / total`. Unknown counts as 0.5 rather than 0, so absent-field rows are not doubly penalized.
+   - `_hard_requirement_penalty(row)`: −0.1 per clearly-failed hard requirement, capped at −0.3. Applied as a direct penalty to the final score after the weighted sum.
+   - `score_breakdown` now reads `_requirement_score(row)` from the summary instead of the old flat field.
+   - `_score()` applies `base − penalty` so hard-requirement failure is visible in the score.
+   - Added transparent `RankingSignal` / `RowRankingSummary` system: `ranking_summary(row, plan, query)` decomposes the final score into labeled weighted components; `rank_rows()` attaches this to each row so the API response carries a full score explanation.
+
+5. **Pipeline wiring (`app/api/routes_search.py`)** — Updated imports and insertion point:
+   - `prepare_requirements(query, normalized_query, plan)` called after planning, returns both parsed specs and an augmented plan.
+   - `build_candidate_discovery_plan(plan, requirements=requirements)` passes specs so the extractor can expand its column scope when requirements target non-schema fields.
+   - `attach_requirement_summaries(rows, requirements)` called after gap-fill and cell-verify (fields stable), before final ranking.
+
+6. **Exporter (`app/services/exporter.py`)** — Added requirement columns to CSV output when requirements exist:
+   - `requirements_satisfied_count`, `requirements_total_count`, `requirements_summary` (e.g. `"Location: US:satisfied; Funding ≥ 10M:unknown"`) appended as trailing columns.
+
+7. **Frontend (`static/app.js` + `static/style.css`)** — Updated all requirement UI:
+   - `reqIcon()` now maps by `kind` (numeric=🔢, categorical=🏷️, semantic=💡, location=📍) with field-based fallbacks.
+   - Requirement badges in run stats panel use `req.label` and `req.source_phrase`; hard requirements styled with `.req-badge--hard` (red tint).
+   - Row dataset attributes now read from `row.requirement_summary` instead of flat fields.
+   - Satisfaction indicator on name column shows three-state display: `✓ 3/4 requirements` (green), `2✓ 1✗ 1? / 4` (orange), `? 4 requirements (unknown)` (grey). New `.req-sat--unknown` CSS class.
+   - Requirement tooltip rewritten to iterate `requirement_summary.matches`: shows icon (✓/✗/?), label, reason, matched_value, and truncated evidence_snippet per match. New CSS classes `.req-tooltip-unknown`, `.req-tooltip-reason`, `.req-tooltip-matched`, `.req-tooltip-evidence`.
+
+**Tests added:**
+- `tests/test_requirements.py` — parser tests (location, numeric, categorical, semantic, conservative no-op), evaluator tests (satisfied/not_satisfied/unknown, numeric M/B/K, location normalization, semantic matching), ranker tests (more satisfied → ranks higher, failed hard req penalized, unknown < satisfied).
+- `tests/test_requirement_ranking.py` — end-to-end ranking integration: requirement-aware score ordering and hard-penalty subtraction.
+- `tests/test_exporter.py` — extended with CSV requirement column coverage.
+- `tests/test_ranker.py` — extended with requirement_summary-based score tests.
+
+**Why this change was chosen:**
+The alternative was to keep the binary system and tune thresholds. That was rejected because:
+- Binary True/False on absent fields conflates "this entity clearly doesn't meet the constraint" with "we just haven't found this data yet" — two very different things for a discovery system.
+- Binary evaluation has no evidence trail — a reviewer cannot see which column matched, what value was found, or why a judgment was made. Without provenance, the requirement badges are just decorative.
+- Hard requirements need a penalty separate from the satisfaction ratio weight; the 0.15 weight alone is too weak to distinguish a row that satisfies all hard constraints from one that fails them when the other scoring signals dominate.
+
+**Tradeoffs introduced:**
+- `unknown` as a first-class state means rows with sparse fields are not penalized for what we don't know. This is correct for a discovery system, but it means requirements only visibly penalize ranking when the relevant field was actually extracted and found non-matching.
+- Semantic topic requirements (e.g. "search engine" from "search engine startups") are matched as substring against category/type cells. A row with `category: "web crawler"` would show `unknown` rather than `not_satisfied`, even though a human might infer it doesn't match "search engine". Substring matching is intentionally conservative.
+- The `satisfaction_ratio` formula (`sat / (sat + not_sat)`, ignoring unknown) means a row with 0 satisfied, 0 not_satisfied, 3 unknown gets `satisfaction_ratio = 1.0` — it is not penalized. This is the desired behavior, but it means requirement transparency in the UI requires drilling into the per-match tooltip rather than reading the headline ratio.
+- Hard requirement penalty (−0.1 per failed, cap −0.3) is a chosen constant. It is enough to push a row down the rankings relative to otherwise comparable rows, but will not drop a strong row with many other signals to the bottom.
+
+**Files/modules affected:**
+`app/models/schema.py`, `app/services/requirement_parser.py`, `app/services/requirement_scorer.py`, `app/services/ranker.py`, `app/api/routes_search.py`, `app/services/exporter.py`, `static/app.js`, `static/style.css`, `tests/test_requirements.py` (new), `tests/test_requirement_ranking.py` (new), `tests/test_exporter.py`, `tests/test_ranker.py`.
+
+---
+
 ## Overall Progress Summary
 
 **Phase 1 (Iterations 1–2) — Reliability:**  
@@ -1243,8 +1333,11 @@ Added lightweight query normalization, constrained query-family planning, discov
 **Phase 15 (Iteration 22) — Demo Hardening and Semantic Cleanup:**  
 Reverted the default demo extractor path to OpenAI, added a targeted late pseudo-entity filter for list/category artifacts, and tightened website semantics so final `website` values prefer canonical homepages over article or directory URLs. Validation: 157/157 tests passing, startup logs confirmed `planner=openai ... extractor=openai ...`, and the final saved healthcare smoke-test result no longer contained the pseudo row `ai-copilots-agents-for-psychiatry`.
 
+**Phase 16 (Iteration 25) — Provenance-First Requirement-Aware Ranking:**  
+Replaced the thin binary requirement system with full provenance-first requirement evaluation. New typed models (`RequirementSpec`, `RequirementMatch`, `RowRequirementsSummary`) produce three-state judgments (satisfied / not_satisfied / unknown) grounded in matched cell values, matched columns, human-readable reasons, and evidence snippets. Unknown state (absent field) is not penalized as failure — only clearly failing matches reduce ranking. Parser upgraded with semantic topic extraction (compound modifiers before entity-type words), location normalization (US/UK/EU variants, US states), and schema-aware column binding per query family. Ranker updated: `_requirement_score` weights unknown at 0.5, and `_hard_requirement_penalty` subtracts up to 0.3 for clearly-failed hard requirements. UI shows three-state satisfaction badge, per-requirement tooltip with reason/evidence/matched_value, `?` unknown state, hard-requirement badge styling. CSV exports include requirement summary columns.
+
 **Remaining gaps:**  
-No ground-truth labels — metrics are proxy signals, not precision/recall. The OpenAI-first demo path is more stable, but optional secondary-provider fallback can still trade latency/cost for correctness preservation when the primary provider is degraded (see Known Limitation #6 and #9).
+No ground-truth labels — metrics are proxy signals, not precision/recall. The OpenAI-first demo path is more stable, but optional secondary-provider fallback can still trade latency/cost for correctness preservation when the primary provider is degraded. Semantic topic requirement matching is intentionally conservative (substring); a "search engine" requirement won't catch "web crawler" equivalents.
 
 ---
 
