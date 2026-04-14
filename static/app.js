@@ -8,6 +8,8 @@ let pollTimer = null;
 let pipelineStartTime = null;
 let elapsedTimer = null;
 let currentQuery = "";
+let _currentRequirements = [];  // QueryRequirement[] from current result
+let _activeReqFilter = "all";   // current filter selection
 
 // ── DOM refs ───────────────────────────────────────────────────────────────
 const form = document.getElementById("search-form");
@@ -42,6 +44,10 @@ const sumDuration = document.getElementById("sum-duration");
 const retrievalBody = document.getElementById("retrieval-plan-body");
 const qualityBody = document.getElementById("quality-controls-body");
 const statsBody = document.getElementById("run-stats-body");
+
+// Requirement UI
+const reqFilterBar = document.getElementById("req-filter-bar");
+const reqTooltip = document.getElementById("req-tooltip");
 
 // Modal
 const modalOverlay = document.getElementById("modal-overlay");
@@ -86,6 +92,25 @@ function confLabel(conf) {
   if (conf >= 0.8) return "high";
   if (conf >= 0.5) return "medium";
   return "low";
+}
+
+// ── Requirement helpers ────────────────────────────────────────────────────
+function reqIcon(kindOrField) {
+  const icons = {
+    // kind-based
+    location: "📍",
+    numeric: "🔢",
+    categorical: "🏷️",
+    semantic: "💡",
+    // field-based (legacy + fallback)
+    funding: "💰",
+    stage: "🏢",
+    license: "📄",
+    language: "💻",
+    founded: "📅",
+    employees: "👥",
+  };
+  return icons[(kindOrField || "").toLowerCase()] || "🔍";
 }
 
 // ── Source type classification (simplified frontend mirror of source_quality.py) ─
@@ -375,6 +400,9 @@ async function pollJob() {
 // ── Render results ─────────────────────────────────────────────────────────
 function renderResults(data) {
   const m = data.metadata;
+  _currentRequirements = m.requirements || [];
+  _activeReqFilter = "all";
+
   const normalizedChanged =
     m.normalized_query && m.normalized_query !== (m.original_query || currentQuery);
 
@@ -407,6 +435,9 @@ function renderResults(data) {
 
   // ── Table ──
   renderTable(data);
+
+  // ── Requirement filter bar (shown only when requirements exist) ──
+  renderReqFilterBar(_currentRequirements);
 
   show(resultsSec);
   resultsSec.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -573,6 +604,21 @@ function renderRunStats(m) {
     html += `<tr><td class="stats-label">${esc(label)}</td><td class="stats-value">${esc(String(val))}</td></tr>`;
   }
   html += "</table>";
+
+  // Requirements block — only when requirements were parsed
+  if (m.requirements && m.requirements.length > 0) {
+    html += `<div class="req-section">`;
+    html += `<div class="req-section-header">Requirements detected: ${m.requirements.length}</div>`;
+    html += `<div class="req-badges-row">`;
+    for (const req of m.requirements) {
+      const icon = reqIcon(req.kind || req.field || "other");
+      const priorityClass = req.is_hard ? " req-badge--hard" : "";
+      const label = req.label || req.source_phrase || req.original_text || "";
+      html += `<span class="req-badge${priorityClass}" title="${esc(req.source_phrase || '')}">${icon} ${esc(label)}</span>`;
+    }
+    html += `</div></div>`;
+  }
+
   statsBody.innerHTML = html;
 }
 
@@ -691,6 +737,9 @@ function renderTable(data) {
   const isWide = cols.length > 6;
   const table = document.getElementById("results-table");
 
+  // Reset filter state for new results
+  _activeReqFilter = "all";
+
   // Mark wide schemas
   table.classList.toggle("wide-schema", isWide);
   table.classList.remove("table-compact");
@@ -725,6 +774,16 @@ function renderTable(data) {
   tableBody.innerHTML = "";
   data.rows.forEach((row, rowIdx) => {
     const tr = document.createElement("tr");
+
+    // Attach requirement data for filter logic
+    if (_currentRequirements.length > 0) {
+      const summ = row.requirement_summary || {};
+      const satCount = summ.requirements_satisfied_count || 0;
+      const satRatio = summ.satisfaction_ratio != null ? summ.satisfaction_ratio : 1;
+      tr.dataset.reqSat = satRatio.toFixed(3);
+      tr.dataset.reqSatCount = satCount;
+      tr.dataset.reqTotal = summ.requirements_total_count || _currentRequirements.length;
+    }
 
     // Index
     const tdIdx = document.createElement("td");
@@ -763,6 +822,42 @@ function renderTable(data) {
 
         td.appendChild(span);
         td.appendChild(dot);
+
+        // Requirement satisfaction indicator — only on the primary name column
+        if (colPriority(col) === 0 && _currentRequirements.length > 0) {
+          const summ = row.requirement_summary || {};
+          const total = summ.requirements_total_count || _currentRequirements.length;
+          const satCount = summ.requirements_satisfied_count || 0;
+          const notSatCount = summ.requirements_not_satisfied_count || 0;
+          const unkCount = summ.requirements_unknown_count || 0;
+          const allSat = satCount === total && notSatCount === 0;
+          const anyFailed = notSatCount > 0;
+          const allUnknown = unkCount === total;
+          const colorClass = allSat
+            ? "req-sat--green"
+            : anyFailed
+              ? (notSatCount === total ? "req-sat--red" : "req-sat--orange")
+              : "req-sat--unknown";
+          let label;
+          if (allUnknown) {
+            label = `? ${total} requirements (unknown)`;
+          } else if (allSat) {
+            label = `\u2713 ${satCount}/${total} requirements`;
+          } else {
+            label = `${satCount}\u2713 ${notSatCount}\u2717 ${unkCount}? / ${total}`;
+          }
+
+          const satDiv = document.createElement("div");
+          satDiv.className = `req-sat ${colorClass}`;
+          satDiv.textContent = label;
+          satDiv.addEventListener("mouseenter", (e) =>
+            showReqTooltip(e, row),
+          );
+          satDiv.addEventListener("mouseleave", hideReqTooltip);
+          // Prevent click from bubbling up to the td's openModal handler
+          satDiv.addEventListener("click", (e) => e.stopPropagation());
+          td.appendChild(satDiv);
+        }
 
         td.addEventListener("click", () => openModal(col, cell, row));
       } else {
@@ -828,6 +923,118 @@ function buildTrustBadges(row) {
   }
 
   return badges.join(" ");
+}
+
+// ── Requirement filter bar ────────────────────────────────────────────────
+function renderReqFilterBar(requirements) {
+  if (!requirements || requirements.length === 0) {
+    reqFilterBar.classList.add("hidden");
+    return;
+  }
+  reqFilterBar.classList.remove("hidden");
+
+  const total = requirements.length;
+  let html = `<span class="req-filter-label">Filter:</span>`;
+
+  const filters = [{ id: "all", label: "All results" }];
+  filters.push({ id: "all-req", label: `Satisfies all ${total}` });
+  if (total >= 3) {
+    filters.push({ id: "2plus", label: "Satisfies 2+" });
+  }
+  if (total >= 2) {
+    filters.push({ id: "1plus", label: "Satisfies 1+" });
+  }
+
+  for (const f of filters) {
+    const activeClass =
+      _activeReqFilter === f.id ? " req-filter-btn--active" : "";
+    html += `<button class="req-filter-btn${activeClass}" data-filter="${f.id}">${esc(f.label)}</button>`;
+  }
+
+  html += `<span class="req-sort-note">Ranked by evidence quality + requirement match</span>`;
+  reqFilterBar.innerHTML = html;
+
+  reqFilterBar.querySelectorAll(".req-filter-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      _activeReqFilter = btn.dataset.filter;
+      applyReqFilter(_activeReqFilter);
+      renderReqFilterBar(requirements);
+    });
+  });
+}
+
+function applyReqFilter(filter) {
+  tableBody.querySelectorAll("tr").forEach((tr) => {
+    const reqTotal = parseInt(tr.dataset.reqTotal || "0", 10);
+    // Rows with no requirement data are always shown
+    if (reqTotal === 0) {
+      tr.style.display = "";
+      return;
+    }
+    const sat = parseFloat(tr.dataset.reqSat || "1");
+    const satCount = parseInt(tr.dataset.reqSatCount || "0", 10);
+
+    let visible = true;
+    if (filter === "all-req") visible = sat >= 0.999;
+    else if (filter === "2plus") visible = satCount >= 2;
+    else if (filter === "1plus") visible = satCount >= 1;
+
+    tr.style.display = visible ? "" : "none";
+  });
+}
+
+// ── Requirement tooltip ───────────────────────────────────────────────────
+function showReqTooltip(e, row) {
+  const summ = row.requirement_summary || {};
+  const matches = summ.matches || [];
+  if (matches.length === 0) return;
+
+  let html = "";
+  for (const m of matches) {
+    const statusClass =
+      m.status === "satisfied"
+        ? "req-tooltip-sat"
+        : m.status === "not_satisfied"
+          ? "req-tooltip-unsat"
+          : "req-tooltip-unknown";
+    const icon =
+      m.status === "satisfied" ? "✓" : m.status === "not_satisfied" ? "✗" : "?";
+    let row_html = `<div class="${statusClass}"><strong>${icon} ${esc(m.label)}</strong>`;
+    if (m.reason) {
+      row_html += `<div class="req-tooltip-reason">${esc(m.reason)}</div>`;
+    }
+    if (m.matched_value) {
+      row_html += `<div class="req-tooltip-matched">Value: ${esc(m.matched_value)}</div>`;
+    }
+    if (m.evidence_snippet) {
+      const snippet = m.evidence_snippet.length > 120
+        ? m.evidence_snippet.slice(0, 117) + "…"
+        : m.evidence_snippet;
+      row_html += `<div class="req-tooltip-evidence">${esc(snippet)}</div>`;
+    }
+    row_html += `</div>`;
+    html += row_html;
+  }
+
+  reqTooltip.innerHTML = html;
+  reqTooltip.style.left = `${e.clientX + 14}px`;
+  reqTooltip.style.top = `${e.clientY + 14}px`;
+  reqTooltip.classList.remove("hidden");
+
+  // Nudge back into viewport if it overflows
+  requestAnimationFrame(() => {
+    const r = reqTooltip.getBoundingClientRect();
+    if (r.right > window.innerWidth - 8) {
+      reqTooltip.style.left = `${e.clientX - r.width - 14}px`;
+    }
+    if (r.bottom > window.innerHeight - 8) {
+      reqTooltip.style.top = `${e.clientY - r.height - 14}px`;
+    }
+  });
+}
+
+function hideReqTooltip() {
+  reqTooltip.classList.add("hidden");
 }
 
 // ── Modal ──────────────────────────────────────────────────────────────────

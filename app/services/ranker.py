@@ -30,18 +30,19 @@ from app.utils.url import extract_domain
 log = get_logger(__name__)
 
 _WEIGHTS = {
-    "completeness": 0.16,
-    "field_importance": 0.12,
-    "avg_confidence": 0.16,
-    "source_support": 0.06,
-    "actionable": 0.05,
-    "source_quality": 0.18,
+    "completeness": 0.13,
+    "field_importance": 0.10,
+    "avg_confidence": 0.13,
+    "source_support": 0.04,
+    "actionable": 0.04,
+    "source_quality": 0.16,
     "source_diversity": 0.05,
-    "local_fit": 0.08,
+    "local_fit": 0.06,
     "freshness": 0.04,
     "reputation": 0.04,
     "official_fit": 0.04,
     "structured_fit": 0.02,
+    "requirement_satisfaction": 0.15,
 }
 
 _WEAK_SIGNAL_COLS = {
@@ -292,6 +293,27 @@ def _structured_fit(row: EntityRow, plan: PlannerOutput) -> float:
     return 0.5
 
 
+def _requirement_score(row: EntityRow) -> float:
+    """Score [0, 1] based on satisfied/unknown/not_satisfied counts. Unknown counts 0.5."""
+    summ = row.requirement_summary
+    if summ.requirements_total_count == 0:
+        return 1.0
+    sat = summ.requirements_satisfied_count
+    unk = summ.requirements_unknown_count
+    not_sat = summ.requirements_not_satisfied_count
+    total = summ.requirements_total_count
+    return round((sat * 1.0 + unk * 0.5 + not_sat * 0.0) / total, 3)
+
+
+def _hard_requirement_penalty(row: EntityRow) -> float:
+    """Subtract up to 0.3 from final score for clearly failed hard requirements."""
+    failed_hard = sum(
+        1 for m in row.requirement_summary.matches
+        if m.status == "not_satisfied" and m.is_hard
+    )
+    return min(failed_hard * 0.1, 0.3)
+
+
 def score_breakdown(row: EntityRow, plan: PlannerOutput, query: str | None = None) -> dict[str, float]:
     num_columns = max(len(plan.columns), 1)
     completeness = len(row.cells) / num_columns
@@ -315,6 +337,7 @@ def score_breakdown(row: EntityRow, plan: PlannerOutput, query: str | None = Non
         "reputation": round(_reputation_score(row), 3),
         "official_fit": round(_official_fit(row, plan), 3),
         "structured_fit": round(_structured_fit(row, plan), 3),
+        "requirement_satisfaction": _requirement_score(row),
     }
     return breakdown
 
@@ -322,7 +345,9 @@ def score_breakdown(row: EntityRow, plan: PlannerOutput, query: str | None = Non
 def _score(row: EntityRow, plan: PlannerOutput, query: str | None = None) -> float:
     breakdown = score_breakdown(row, plan, query)
     weights = _get_weights()
-    return sum(weights[key] * breakdown[key] for key in weights)
+    base = sum(weights[key] * breakdown[key] for key in weights)
+    penalty = _hard_requirement_penalty(row)
+    return round(base - penalty, 4)
 
 
 def is_row_viable(row: EntityRow, plan: PlannerOutput) -> bool:

@@ -21,6 +21,7 @@ from app.models.db import complete_job, create_job, fail_job, get_job, update_jo
 from app.models.schema import (
     JobStatus,
     PlannerOutput,
+    RequirementSpec,
     SearchMetadata,
     SearchRequest,
     SearchResponse,
@@ -36,6 +37,8 @@ from app.services.planner import plan_schema
 from app.services.query_normalizer import normalize_query
 from app.services.ranker import prune_rows, rank_rows
 from app.services.reranker import rerank_pages
+from app.services.requirement_parser import parse_requirements_deterministic
+from app.services.requirement_scorer import attach_requirement_summaries
 from app.services.scraper import scrape_pages
 from app.services.verifier import verify_rows
 
@@ -68,9 +71,20 @@ async def _run_pipeline(job_id: str, query: str) -> None:
         stage_start = time.monotonic()
         plan: PlannerOutput = await plan_schema(retrieval_query, stats=planner_stats)
         stage_timings_ms["planning"] = round((time.monotonic() - stage_start) * 1000, 1)
+
+        # 1b. Parse requirements from the query (fast, deterministic — no extra latency)
+        requirements: list[RequirementSpec] = parse_requirements_deterministic(retrieval_query)
+        if requirements:
+            log.info(
+                "Requirements parsed: %d — %s",
+                len(requirements),
+                [r.original_text for r in requirements],
+            )
+
         pipeline_counts: dict[str, int] = {
             "search_angles": len(plan.search_angles),
             "search_facets": len(plan.facets),
+            "requirements_parsed": len(requirements),
         }
         log.info(
             "Plan: family=%s entity_type=%r columns=%s facets=%d normalized_query=%r",
@@ -193,6 +207,9 @@ async def _run_pipeline(job_id: str, query: str) -> None:
         if settings.cell_verifier_enabled:
             rows = verify_rows_cells(rows)
 
+        # Evaluate requirements against each row now that gap-fill has populated fields.
+        attach_requirement_summaries(rows, requirements)
+
         rows = rank_rows(rows, plan, retrieval_query)
 
         await _phase("verifying")
@@ -255,6 +272,8 @@ async def _run_pipeline(job_id: str, query: str) -> None:
                 duration_seconds=duration,
                 pipeline_counts=pipeline_counts,
                 pipeline_timings_ms=stage_timings_ms,
+                requirements=requirements,
+                requirements_parsed=len(requirements),
             ),
         )
 

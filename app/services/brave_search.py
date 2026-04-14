@@ -93,6 +93,10 @@ async def run_brave_search(
                 seen_norm.add(norm)
                 deduped.append(result)
 
+    # 5 angles × 5 results = up to 25 URLs
+    # After deduplication → typically 15-20 unique URLs
+    # After scraping (some fail) → typically 10-15 pages
+    # After reranking (top_k=10) → 10 pages go to extraction
     log.info(
         "Brave search: %d angles → %d unique URLs",
         len(angles),

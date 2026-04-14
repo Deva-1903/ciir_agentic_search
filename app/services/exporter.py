@@ -25,6 +25,8 @@ def to_csv(response: SearchResponse) -> str:
     """Return a flattened CSV string with provenance columns."""
     columns = response.columns
 
+    has_requirements = bool(response.metadata.requirements)
+
     # Build header
     header = ["entity_id"]
     for col in columns:
@@ -32,6 +34,8 @@ def to_csv(response: SearchResponse) -> str:
         header.append(f"{col}_source_url")
         header.append(f"{col}_confidence")
     header += ["sources_count", "aggregate_confidence"]
+    if has_requirements:
+        header += ["requirements_satisfied", "requirements_total", "requirements_summary"]
 
     output = io.StringIO()
     writer = csv.writer(output, lineterminator="\n")
@@ -49,6 +53,15 @@ def to_csv(response: SearchResponse) -> str:
                 record.extend(["", "", ""])
         record.append(str(row.sources_count))
         record.append(str(row.aggregate_confidence))
+        if has_requirements:
+            summ = row.requirement_summary
+            record.append(str(summ.requirements_satisfied_count))
+            record.append(str(summ.requirements_total_count))
+            parts = [
+                f"{m.label}:{m.status}"
+                for m in summ.matches
+            ]
+            record.append("; ".join(parts))
         writer.writerow(record)
 
     return output.getvalue()

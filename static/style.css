@@ -956,6 +956,165 @@ details[open] > .panel__header {
   margin-right: 0.3rem;
 }
 
+/* ── Requirement filter bar ───────────────────────────────────────────────── */
+.req-filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0.55rem;
+}
+.req-filter-label {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  margin-right: 0.15rem;
+}
+.req-filter-btn {
+  padding: 0.28rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-card);
+  color: var(--text-dim);
+  font-size: 0.75rem;
+  cursor: pointer;
+  transition:
+    border-color 0.15s,
+    color 0.15s,
+    background 0.15s;
+}
+.req-filter-btn:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+.req-filter-btn--active {
+  background: rgba(91, 124, 246, 0.15);
+  border-color: var(--accent);
+  color: #c7d2fe;
+  font-weight: 600;
+}
+.req-sort-note {
+  font-size: 0.72rem;
+  color: var(--text-dim);
+  margin-left: auto;
+  opacity: 0.75;
+  white-space: nowrap;
+}
+
+/* ── Requirement satisfaction indicator (inside name cell) ───────────────── */
+.req-sat {
+  display: block;
+  margin-top: 0.28rem;
+  font-size: 0.68rem;
+  padding: 0.1rem 0.42rem;
+  border-radius: 999px;
+  cursor: default;
+  font-weight: 500;
+  white-space: nowrap;
+  width: fit-content;
+}
+.req-sat--green {
+  background: rgba(52, 211, 153, 0.12);
+  color: var(--green);
+  border: 1px solid rgba(52, 211, 153, 0.25);
+}
+.req-sat--orange {
+  background: rgba(251, 191, 36, 0.1);
+  color: var(--yellow);
+  border: 1px solid rgba(251, 191, 36, 0.22);
+}
+.req-sat--red {
+  background: rgba(248, 113, 113, 0.1);
+  color: var(--red);
+  border: 1px solid rgba(248, 113, 113, 0.22);
+}
+.req-sat--unknown {
+  background: rgba(148, 163, 184, 0.1);
+  color: var(--text-dim);
+  border: 1px solid rgba(148, 163, 184, 0.22);
+}
+
+/* ── Requirement hover tooltip ───────────────────────────────────────────── */
+.req-tooltip {
+  position: fixed;
+  z-index: 600;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.5rem 0.75rem;
+  font-size: 0.76rem;
+  line-height: 1.6;
+  min-width: 200px;
+  max-width: 340px;
+  pointer-events: none;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.45);
+}
+.req-tooltip-sat {
+  color: var(--green);
+  margin-bottom: 0.35rem;
+}
+.req-tooltip-unsat {
+  color: var(--red);
+  margin-bottom: 0.35rem;
+}
+.req-tooltip-unknown {
+  color: var(--text-dim);
+  margin-bottom: 0.35rem;
+}
+.req-tooltip-reason {
+  font-size: 0.7rem;
+  opacity: 0.8;
+  margin-top: 0.1rem;
+  font-style: italic;
+}
+.req-tooltip-matched {
+  font-size: 0.7rem;
+  opacity: 0.75;
+  margin-top: 0.1rem;
+}
+.req-tooltip-evidence {
+  font-size: 0.67rem;
+  opacity: 0.65;
+  margin-top: 0.1rem;
+  font-style: italic;
+  line-height: 1.4;
+  border-left: 2px solid var(--border);
+  padding-left: 0.4rem;
+}
+
+/* ── Requirements block inside Run Stats panel ───────────────────────────── */
+.req-section {
+  margin-top: 0.85rem;
+  padding-top: 0.7rem;
+  border-top: 1px solid var(--border);
+}
+.req-section-header {
+  font-size: 0.78rem;
+  color: var(--text-dim);
+  margin-bottom: 0.45rem;
+}
+.req-badges-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+.req-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  padding: 0.13rem 0.48rem;
+  border-radius: 999px;
+  background: rgba(91, 124, 246, 0.1);
+  color: #a5b4fc;
+  border: 1px solid rgba(91, 124, 246, 0.25);
+  font-size: 0.72rem;
+  font-weight: 500;
+}
+.req-badge--hard {
+  background: rgba(248, 113, 113, 0.08);
+  color: #fca5a5;
+  border-color: rgba(248, 113, 113, 0.2);
+}
+
 /* ── Responsive ──────────────────────────────────────────────────────────── */
 @media (max-width: 700px) {
   .search-form {

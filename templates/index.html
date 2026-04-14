@@ -184,6 +184,10 @@
           Click any cell to view its source URL, evidence snippet, and
           confidence score.
         </p>
+
+        <!-- Requirement filter bar — shown only when requirements were parsed -->
+        <div id="req-filter-bar" class="req-filter-bar hidden"></div>
+
         <div class="table-scroll">
           <table id="results-table" class="results-table">
             <thead id="table-head"></thead>
@@ -264,6 +268,9 @@
         <div class="modal__flags" id="modal-flags"></div>
       </div>
     </div>
+
+    <!-- Requirement tooltip — positioned by JS on hover -->
+    <div id="req-tooltip" class="req-tooltip hidden"></div>
 
     <script src="/static/app.js"></script>
   </body>

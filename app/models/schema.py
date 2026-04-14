@@ -126,12 +126,54 @@ class Cell(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
 
 
+class RequirementSpec(BaseModel):
+    """A structured requirement parsed from the free-text query — richer replacement for QueryRequirement."""
+    id: str                           # short slug, e.g. "loc_0", "fund_1"
+    label: str                        # human-readable, e.g. "Location: US"
+    kind: str                         # categorical | location | numeric | semantic
+    operator: str                     # equals | contains | greater_than | less_than | at_least | exists | matches_topic
+    target_value: Optional[str] = None       # normalised value, e.g. "us", "10M", "startup"
+    target_value_raw: Optional[str] = None   # raw as seen in query, e.g. "United States", "Series B"
+    source_phrase: str                # exact substring of the query this came from
+    priority: str = "medium"          # high | medium
+    is_hard: bool = False             # if True, failure applies ranker penalty
+    mapped_columns: List[str] = Field(default_factory=list)   # schema columns to check
+    notes: Optional[str] = None
+
+
+class RequirementMatch(BaseModel):
+    """Per-row evaluation result for one RequirementSpec."""
+    requirement_id: str
+    label: str
+    status: str                        # satisfied | not_satisfied | unknown
+    confidence: float = Field(ge=0.0, le=1.0, default=0.0)
+    matched_value: Optional[str] = None       # value found in the row cell
+    matched_column: Optional[str] = None      # which column name matched
+    reason: Optional[str] = None              # short human-readable explanation
+    evidence_snippet: Optional[str] = None    # evidence from the cell
+    evidence_source_url: Optional[str] = None
+    score_contribution: Optional[float] = None
+    is_hard: bool = False
+
+
+class RowRequirementsSummary(BaseModel):
+    """Aggregated requirement evaluation for a single EntityRow."""
+    requirements_total_count: int = 0
+    requirements_satisfied_count: int = 0
+    requirements_not_satisfied_count: int = 0
+    requirements_unknown_count: int = 0
+    satisfaction_ratio: float = 1.0   # satisfied / (satisfied + not_satisfied); 1.0 when all unknown
+    hard_requirements_satisfied_count: int = 0
+    matches: List[RequirementMatch] = Field(default_factory=list)
+
+
 class EntityRow(BaseModel):
     entity_id: str
     cells: Dict[str, Cell]          # column_name → Cell
     aggregate_confidence: float
     sources_count: int
     canonical_domain: Optional[str] = None
+    requirement_summary: RowRequirementsSummary = Field(default_factory=RowRequirementsSummary)
 
 
 class SearchMetadata(BaseModel):
@@ -150,6 +192,8 @@ class SearchMetadata(BaseModel):
     duration_seconds: float
     pipeline_counts: Dict[str, int] = Field(default_factory=dict)
     pipeline_timings_ms: Dict[str, float] = Field(default_factory=dict)
+    requirements: List[RequirementSpec] = Field(default_factory=list)
+    requirements_parsed: int = 0
 
 
 class SearchResponse(BaseModel):
