@@ -12,6 +12,16 @@ For the full iteration log and engineering decisions, see [BUILD_JOURNAL.md](./B
 - Plans a constrained schema, searches multiple retrieval angles, detects page evidence regimes, and uses deterministic extractors before LLM fallback.
 - Merges duplicates, resolves official sites, fills missing fields, verifies cells, ranks rows, and returns structured output with provenance.
 
+## Recent Changes
+
+Feature: Requirement-Aware Ranking and Transparency
+
+- Added structured query-requirement parsing for explicit constraints such as location, funding thresholds, stage/status, open-source licensing, and topical qualifiers. Parsed requirements are now returned in response metadata and bound to the active schema so evaluable constraints like `funding > 10M` have a real extraction target.
+- Added row-level requirement evaluation with explicit `satisfied`, `not_satisfied`, and `unknown` states, grounded matched values, and evidence-backed reasons. Each row now carries a requirement summary with counts and per-requirement judgments.
+- Integrated requirement satisfaction into ranking as a transparent signal instead of a hidden hard filter. Rows are now ranked using requirement match plus the existing evidence-quality, source-support, official-site, diversity, and confidence signals, with penalties for clearly failed hard requirements.
+- Expanded the reviewer-facing UI with a parsed-requirements summary panel, per-row requirement badges like `3/4 reqs`, requirement hover breakdowns, requirement filters, and a ranking explanation tooltip that shows which signals contributed to a row's final position.
+- Updated exports and tests to cover the new requirement-aware flow, including structured JSON fields, flattened CSV summaries, parser/evaluator/ranking tests, and UI contract coverage through backend serialization.
+
 ## Live Demo
 
 **[https://agentic-search-uij3k.ondigitalocean.app/](https://agentic-search-uij3k.ondigitalocean.app/)**
