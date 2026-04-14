@@ -37,7 +37,7 @@ from app.services.planner import plan_schema
 from app.services.query_normalizer import normalize_query
 from app.services.ranker import prune_rows, rank_rows
 from app.services.reranker import rerank_pages
-from app.services.requirement_parser import parse_requirements_deterministic
+from app.services.requirement_parser import prepare_requirements
 from app.services.requirement_scorer import attach_requirement_summaries
 from app.services.scraper import scrape_pages
 from app.services.verifier import verify_rows
@@ -72,13 +72,17 @@ async def _run_pipeline(job_id: str, query: str) -> None:
         plan: PlannerOutput = await plan_schema(retrieval_query, stats=planner_stats)
         stage_timings_ms["planning"] = round((time.monotonic() - stage_start) * 1000, 1)
 
-        # 1b. Parse requirements from the query (fast, deterministic — no extra latency)
-        requirements: list[RequirementSpec] = parse_requirements_deterministic(retrieval_query)
+        # 1b. Parse requirements from the original query and align them to the plan.
+        requirements, plan = prepare_requirements(
+            query,
+            normalized_query=retrieval_query,
+            plan=plan,
+        )
         if requirements:
             log.info(
                 "Requirements parsed: %d — %s",
                 len(requirements),
-                [r.original_text for r in requirements],
+                [r.source_phrase for r in requirements],
             )
 
         pipeline_counts: dict[str, int] = {
@@ -135,7 +139,7 @@ async def _run_pipeline(job_id: str, query: str) -> None:
 
         # 4. Candidate discovery
         await _phase("extracting")
-        discovery_plan = build_candidate_discovery_plan(plan)
+        discovery_plan = build_candidate_discovery_plan(plan, requirements=requirements)
         log.info(
             "Discovering candidates from %d reranked pages using columns=%s",
             len(pages_for_discovery),

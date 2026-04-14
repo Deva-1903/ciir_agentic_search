@@ -956,6 +956,27 @@ details[open] > .panel__header {
   margin-right: 0.3rem;
 }
 
+.req-summary-panel {
+  margin-bottom: 0.75rem;
+  padding: 0.8rem 0.9rem;
+  border: 1px solid var(--border);
+  border-radius: calc(var(--radius) + 2px);
+  background:
+    linear-gradient(180deg, rgba(91, 124, 246, 0.08), rgba(91, 124, 246, 0.03)),
+    var(--bg-card);
+}
+.req-summary-title {
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--text);
+}
+.req-summary-subtitle {
+  margin-top: 0.18rem;
+  margin-bottom: 0.55rem;
+  font-size: 0.74rem;
+  color: var(--text-dim);
+}
+
 /* ── Requirement filter bar ───────────────────────────────────────────────── */
 .req-filter-bar {
   display: flex;
@@ -1048,6 +1069,18 @@ details[open] > .panel__header {
   pointer-events: none;
   box-shadow: 0 4px 18px rgba(0, 0, 0, 0.45);
 }
+.req-tooltip-group + .req-tooltip-group {
+  margin-top: 0.45rem;
+  padding-top: 0.35rem;
+  border-top: 1px solid var(--border);
+}
+.req-tooltip-heading {
+  font-size: 0.68rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin-bottom: 0.22rem;
+}
 .req-tooltip-sat {
   color: var(--green);
   margin-bottom: 0.35rem;
@@ -1079,6 +1112,70 @@ details[open] > .panel__header {
   line-height: 1.4;
   border-left: 2px solid var(--border);
   padding-left: 0.4rem;
+}
+.req-tooltip-source {
+  font-size: 0.66rem;
+  color: var(--text-dim);
+  margin-top: 0.15rem;
+}
+
+.rank-tooltip {
+  position: fixed;
+  z-index: 610;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.65rem 0.8rem;
+  min-width: 260px;
+  max-width: 420px;
+  max-height: min(60vh, 520px);
+  overflow: auto;
+  pointer-events: none;
+  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.45);
+}
+.rank-tooltip-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.6rem;
+}
+.rank-tooltip-title {
+  font-size: 0.84rem;
+  font-weight: 700;
+  color: var(--text);
+}
+.rank-tooltip-score {
+  font-size: 0.76rem;
+  color: var(--accent-soft);
+}
+.rank-tooltip-meta {
+  margin-top: 0.18rem;
+  font-size: 0.7rem;
+  color: var(--text-dim);
+}
+.rank-tooltip-table {
+  margin-top: 0.55rem;
+  border-top: 1px solid var(--border);
+  padding-top: 0.45rem;
+}
+.rank-tooltip-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.7rem;
+  align-items: baseline;
+  padding: 0.16rem 0;
+}
+.rank-tooltip-label {
+  font-size: 0.72rem;
+  color: var(--text);
+}
+.rank-tooltip-value {
+  font-size: 0.68rem;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.badge--rank {
+  cursor: help;
 }
 
 /* ── Requirements block inside Run Stats panel ───────────────────────────── */

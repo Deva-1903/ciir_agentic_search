@@ -53,6 +53,18 @@ class TestRankRows:
         ranked = rank_rows(rows, plan)
         assert len(ranked) == 10
 
+    def test_attaches_ranking_summary(self):
+        plan = _plan(["name", "website", "headquarters"])
+        row = _row("a", {"name": "A", "website": "https://a.com", "headquarters": "New York"})
+
+        ranked = rank_rows([row], plan, query="search engine startups in the US with funding > 10M")
+
+        summary = ranked[0].ranking_summary
+        assert summary.rank_position == 1
+        assert summary.final_score > 0
+        assert any(component.key == "source_quality" for component in summary.components)
+        assert any(component.key == "requirement_satisfaction" for component in summary.components)
+
     def test_better_sources_rank_higher(self):
         plan = _plan(["name", "address", "website"])
         weak = EntityRow(

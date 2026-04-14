@@ -141,6 +141,13 @@ class RequirementSpec(BaseModel):
     notes: Optional[str] = None
 
 
+class RequirementEvidence(BaseModel):
+    """Grounding for a requirement judgment."""
+    source_url: Optional[str] = None
+    source_title: Optional[str] = None
+    evidence_snippet: Optional[str] = None
+
+
 class RequirementMatch(BaseModel):
     """Per-row evaluation result for one RequirementSpec."""
     requirement_id: str
@@ -150,8 +157,7 @@ class RequirementMatch(BaseModel):
     matched_value: Optional[str] = None       # value found in the row cell
     matched_column: Optional[str] = None      # which column name matched
     reason: Optional[str] = None              # short human-readable explanation
-    evidence_snippet: Optional[str] = None    # evidence from the cell
-    evidence_source_url: Optional[str] = None
+    evidence: Optional[RequirementEvidence] = None
     score_contribution: Optional[float] = None
     is_hard: bool = False
 
@@ -162,9 +168,27 @@ class RowRequirementsSummary(BaseModel):
     requirements_satisfied_count: int = 0
     requirements_not_satisfied_count: int = 0
     requirements_unknown_count: int = 0
-    satisfaction_ratio: float = 1.0   # satisfied / (satisfied + not_satisfied); 1.0 when all unknown
+    satisfaction_ratio: float = 0.0   # satisfied / total requirements
     hard_requirements_satisfied_count: int = 0
     matches: List[RequirementMatch] = Field(default_factory=list)
+
+
+class RankingSignal(BaseModel):
+    """One transparent component of the final row ranking."""
+    key: str
+    label: str
+    value: float = 0.0
+    weight: float = 0.0
+    weighted_value: float = 0.0
+
+
+class RowRankingSummary(BaseModel):
+    """Final ranking explanation attached to a row."""
+    rank_position: Optional[int] = None
+    base_score: float = 0.0
+    final_score: float = 0.0
+    hard_requirement_penalty: float = 0.0
+    components: List[RankingSignal] = Field(default_factory=list)
 
 
 class EntityRow(BaseModel):
@@ -174,6 +198,7 @@ class EntityRow(BaseModel):
     sources_count: int
     canonical_domain: Optional[str] = None
     requirement_summary: RowRequirementsSummary = Field(default_factory=RowRequirementsSummary)
+    ranking_summary: RowRankingSummary = Field(default_factory=RowRankingSummary)
 
 
 class SearchMetadata(BaseModel):

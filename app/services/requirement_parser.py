@@ -17,10 +17,9 @@ RequirementSpec captures constraints that must be satisfied by result rows, such
 from __future__ import annotations
 
 import re
-import uuid
 
 from app.core.logging import get_logger
-from app.models.schema import RequirementSpec
+from app.models.schema import PlannerOutput, RequirementSpec
 
 log = get_logger(__name__)
 
@@ -36,6 +35,47 @@ _FIELD_COLUMNS: dict[str, list[str]] = {
     "employees": ["employees", "team_size", "headcount", "size"],
     "category":  ["category", "industry", "sector", "type", "vertical"],
     "topic":     ["category", "industry", "sector", "type", "vertical", "description", "about"],
+}
+
+_FAMILY_COLUMN_BINDINGS: dict[str, dict[str, list[str]]] = {
+    "organization_company": {
+        "location": ["headquarters"],
+        "topic": ["focus_area", "product_or_service"],
+        "stage": ["stage_or_status"],
+        "funding": ["funding"],
+        "founded": ["founded"],
+        "employees": ["employees"],
+        "license": ["license"],
+    },
+    "place_venue": {
+        "location": ["location", "address"],
+        "topic": ["category", "offering"],
+        "price": ["price_or_availability"],
+        "founded": ["founded"],
+    },
+    "software_project": {
+        "topic": ["primary_use_case"],
+        "license": ["license"],
+        "maintainer": ["maintainer_or_org"],
+        "language": ["language_or_stack"],
+        "website": ["website_or_repo"],
+    },
+    "product_offering": {
+        "topic": ["category", "key_feature"],
+        "price": ["price_or_availability"],
+        "maker": ["maker_or_brand"],
+    },
+    "person_group": {
+        "location": ["location"],
+        "topic": ["role_or_title", "notable_work"],
+        "affiliation": ["affiliation"],
+        "website": ["website_or_profile"],
+    },
+    "generic_entity_list": {
+        "location": ["location"],
+        "topic": ["description", "category"],
+        "website": ["website"],
+    },
 }
 
 # ── Location regex ─────────────────────────────────────────────────────────────
@@ -76,19 +116,25 @@ def _normalize_location(raw: str) -> str:
 
 # ── Funding ───────────────────────────────────────────────────────────────────
 
+_MONEY_VALUE_RE = r"\d+(?:\.\d+)?(?:\s*(?:k|m|b|thousand|million|billion))?"
+
 _FUNDING_GT_RE = re.compile(
-    r"\b(?:funding|raised|valuation)\s*(?:>|≥|over|more\s+than|greater\s+than|at\s+least)\s*"
-    r"\$?(\d+(?:\.\d+)?\s*[kmb]?)\b",
+    rf"\b(?:funding|raised|valuation)\s*(>|≥|over|more\s+than|greater\s+than|at\s+least)\s*"
+    rf"\$?({_MONEY_VALUE_RE})\b",
     re.IGNORECASE,
 )
 _FUNDING_LT_RE = re.compile(
-    r"\b(?:funding|raised|valuation)\s*(?:<|≤|under|less\s+than|below)\s*"
-    r"\$?(\d+(?:\.\d+)?\s*[kmb]?)\b",
+    rf"\b(?:funding|raised|valuation)\s*(<|≤|under|less\s+than|below)\s*"
+    rf"\$?({_MONEY_VALUE_RE})\b",
     re.IGNORECASE,
 )
 
 def _normalize_money(raw: str) -> str:
-    s = raw.strip().replace(" ", "")
+    s = raw.strip().lower().replace(",", "")
+    s = re.sub(r"\s+", "", s)
+    for word, suffix in (("thousand", "K"), ("million", "M"), ("billion", "B")):
+        if s.endswith(word):
+            return f"{s[:-len(word)]}{suffix}".upper()
     return s.upper() if s and s[-1].isalpha() else s
 
 
@@ -186,6 +232,113 @@ def _extract_semantic_requirements(query: str) -> list[RequirementSpec]:
     return specs
 
 
+def _requirement_binding_key(spec: RequirementSpec) -> str:
+    source = f"{spec.source_phrase} {spec.label} {spec.target_value or ''}".lower()
+    target = (spec.target_value or "").lower()
+
+    if spec.kind == "location":
+        return "location"
+    if spec.kind == "semantic":
+        return "topic"
+    if spec.kind == "numeric":
+        if any(token in source for token in ("funding", "raised", "valuation", "capital")):
+            return "funding"
+        if any(token in source for token in ("founded", "established", "year founded")):
+            return "founded"
+        if any(token in source for token in ("employee", "employees", "people", "staff", "headcount", "team size")):
+            return "employees"
+        if any(token in source for token in ("price", "$", "cost", "under", "over")):
+            return "price"
+        return "numeric"
+    if spec.kind == "categorical":
+        if "license" in source or target in {"open-source", "mit", "apache", "gpl", "bsd", "mpl", "lgpl"}:
+            return "license"
+        if target in {"startup", "early-stage", "pre-seed", "seed", "public", "private", "bootstrapped"} or target.startswith("series "):
+            return "stage"
+        return "category"
+    return "topic"
+
+
+def _preferred_columns_for_requirement(spec: RequirementSpec, query_family: str) -> list[str]:
+    key = _requirement_binding_key(spec)
+    preferred = list(_FAMILY_COLUMN_BINDINGS.get(query_family, {}).get(key, []))
+    for col in spec.mapped_columns:
+        if col not in preferred:
+            preferred.append(col)
+    return preferred
+
+
+def _augmentable_columns_for_requirement(spec: RequirementSpec, query_family: str) -> list[str]:
+    key = _requirement_binding_key(spec)
+    return list(_FAMILY_COLUMN_BINDINGS.get(query_family, {}).get(key, []))
+
+
+def augment_plan_with_requirements(
+    plan: PlannerOutput,
+    specs: list[RequirementSpec],
+    *,
+    max_columns: int = 8,
+) -> PlannerOutput:
+    """Expand the schema conservatively so evaluable requirements have a home."""
+    columns = list(plan.columns)
+    changed = False
+
+    for spec in specs:
+        augmentable = _augmentable_columns_for_requirement(spec, plan.query_family)
+        if not augmentable or any(col in columns for col in augmentable):
+            continue
+        for col in augmentable:
+            if col in columns:
+                continue
+            if len(columns) >= max_columns:
+                break
+            columns.append(col)
+            changed = True
+
+    if not changed:
+        return plan
+    return plan.model_copy(update={"columns": columns})
+
+
+def bind_requirements_to_plan(
+    specs: list[RequirementSpec],
+    plan: PlannerOutput,
+) -> list[RequirementSpec]:
+    """Map parsed requirements onto the schema columns actually used for extraction."""
+    bound: list[RequirementSpec] = []
+    for spec in specs:
+        mapped_columns = [
+            col
+            for col in _preferred_columns_for_requirement(spec, plan.query_family)
+            if col in plan.columns
+        ]
+        bound.append(spec.model_copy(update={"mapped_columns": mapped_columns}))
+    return bound
+
+
+def prepare_requirements(
+    query: str,
+    *,
+    normalized_query: str | None = None,
+    plan: PlannerOutput | None = None,
+) -> tuple[list[RequirementSpec], PlannerOutput | None]:
+    """
+    Parse requirements from the original query text, then align them to the plan.
+
+    The original query preserves comparison operators such as `>` that the
+    normalizer intentionally strips before retrieval planning.
+    """
+    specs = parse_requirements_deterministic(query)
+    if not specs and normalized_query and normalized_query != query:
+        specs = parse_requirements_deterministic(normalized_query)
+
+    if plan is None or not specs:
+        return specs, plan
+
+    augmented_plan = augment_plan_with_requirements(plan, specs)
+    return bind_requirements_to_plan(specs, augmented_plan), augmented_plan
+
+
 def parse_requirements_deterministic(query: str) -> list[RequirementSpec]:
     """Extract structured requirements using regex — no LLM, no latency."""
     specs: list[RequirementSpec] = []
@@ -216,13 +369,16 @@ def parse_requirements_deterministic(query: str) -> list[RequirementSpec]:
 
     # ── Funding ───────────────────────────────────────────────────────────────
     for m in _FUNDING_GT_RE.finditer(query):
-        raw = m.group(1)
+        raw_operator = m.group(1).strip().lower()
+        raw = m.group(2)
         norm = _normalize_money(raw)
+        operator = "at_least" if raw_operator in {"≥", "at least"} else "greater_than"
+        label_operator = "≥" if operator == "at_least" else ">"
         specs.append(RequirementSpec(
             id=_next_id("fund"),
-            label=f"Funding ≥ {norm}",
+            label=f"Funding {label_operator} {norm}",
             kind="numeric",
-            operator="greater_than",
+            operator=operator,
             target_value=norm,
             target_value_raw=raw.strip(),
             source_phrase=m.group(0).strip(),
@@ -231,11 +387,11 @@ def parse_requirements_deterministic(query: str) -> list[RequirementSpec]:
             mapped_columns=_FIELD_COLUMNS["funding"],
         ))
     for m in _FUNDING_LT_RE.finditer(query):
-        raw = m.group(1)
+        raw = m.group(2)
         norm = _normalize_money(raw)
         specs.append(RequirementSpec(
             id=_next_id("fund"),
-            label=f"Funding ≤ {norm}",
+            label=f"Funding < {norm}",
             kind="numeric",
             operator="less_than",
             target_value=norm,

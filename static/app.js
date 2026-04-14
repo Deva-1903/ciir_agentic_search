@@ -8,7 +8,7 @@ let pollTimer = null;
 let pipelineStartTime = null;
 let elapsedTimer = null;
 let currentQuery = "";
-let _currentRequirements = [];  // QueryRequirement[] from current result
+let _currentRequirements = [];  // RequirementSpec[] from current result
 let _activeReqFilter = "all";   // current filter selection
 
 // ── DOM refs ───────────────────────────────────────────────────────────────
@@ -46,8 +46,10 @@ const qualityBody = document.getElementById("quality-controls-body");
 const statsBody = document.getElementById("run-stats-body");
 
 // Requirement UI
+const reqSummaryPanel = document.getElementById("req-summary-panel");
 const reqFilterBar = document.getElementById("req-filter-bar");
 const reqTooltip = document.getElementById("req-tooltip");
+const rankTooltip = document.getElementById("rank-tooltip");
 
 // Modal
 const modalOverlay = document.getElementById("modal-overlay");
@@ -111,6 +113,14 @@ function reqIcon(kindOrField) {
     employees: "👥",
   };
   return icons[(kindOrField || "").toLowerCase()] || "🔍";
+}
+
+function reqDisplayLabel(req) {
+  return req.label || req.source_phrase || "";
+}
+
+function pct(value) {
+  return `${Math.round((value || 0) * 100)}%`;
 }
 
 // ── Source type classification (simplified frontend mirror of source_quality.py) ─
@@ -436,6 +446,9 @@ function renderResults(data) {
   // ── Table ──
   renderTable(data);
 
+  // ── Parsed requirements panel ──
+  renderRequirementSummary(_currentRequirements);
+
   // ── Requirement filter bar (shown only when requirements exist) ──
   renderReqFilterBar(_currentRequirements);
 
@@ -598,6 +611,7 @@ function renderRunStats(m) {
     rows.splice(2, 0, ["Normalized query", m.normalized_query]);
   }
   rows.push(["Rerank scorer", m.rerank_scorer || "disabled"]);
+  rows.push(["Parsed requirements", m.requirements?.length || 0]);
 
   let html = '<table class="stats-table">';
   for (const [label, val] of rows) {
@@ -605,21 +619,29 @@ function renderRunStats(m) {
   }
   html += "</table>";
 
-  // Requirements block — only when requirements were parsed
-  if (m.requirements && m.requirements.length > 0) {
-    html += `<div class="req-section">`;
-    html += `<div class="req-section-header">Requirements detected: ${m.requirements.length}</div>`;
-    html += `<div class="req-badges-row">`;
-    for (const req of m.requirements) {
-      const icon = reqIcon(req.kind || req.field || "other");
-      const priorityClass = req.is_hard ? " req-badge--hard" : "";
-      const label = req.label || req.source_phrase || req.original_text || "";
-      html += `<span class="req-badge${priorityClass}" title="${esc(req.source_phrase || '')}">${icon} ${esc(label)}</span>`;
-    }
-    html += `</div></div>`;
+  statsBody.innerHTML = html;
+}
+
+function renderRequirementSummary(requirements) {
+  if (!requirements || requirements.length === 0) {
+    reqSummaryPanel.classList.add("hidden");
+    reqSummaryPanel.innerHTML = "";
+    return;
   }
 
-  statsBody.innerHTML = html;
+  let html = `<div class="req-summary-title">Parsed Requirements</div>`;
+  html += `<div class="req-summary-subtitle">${requirements.length} explicit query requirement${requirements.length === 1 ? "" : "s"} detected for ranking and review</div>`;
+  html += `<div class="req-badges-row">`;
+  for (const req of requirements) {
+    const icon = reqIcon(req.kind || "other");
+    const priorityClass = req.is_hard ? " req-badge--hard" : "";
+    const sourcePhrase = req.source_phrase ? ` title="${esc(req.source_phrase)}"` : "";
+    html += `<span class="req-badge${priorityClass}"${sourcePhrase}>${icon} ${esc(reqDisplayLabel(req))}</span>`;
+  }
+  html += `</div>`;
+
+  reqSummaryPanel.innerHTML = html;
+  reqSummaryPanel.classList.remove("hidden");
 }
 
 // ── Column type classifier for smart sizing ──────────────────────────────
@@ -779,10 +801,10 @@ function renderTable(data) {
     if (_currentRequirements.length > 0) {
       const summ = row.requirement_summary || {};
       const satCount = summ.requirements_satisfied_count || 0;
-      const satRatio = summ.satisfaction_ratio != null ? summ.satisfaction_ratio : 1;
-      tr.dataset.reqSat = satRatio.toFixed(3);
       tr.dataset.reqSatCount = satCount;
       tr.dataset.reqTotal = summ.requirements_total_count || _currentRequirements.length;
+      tr.dataset.reqUnknownCount = summ.requirements_unknown_count || 0;
+      tr.dataset.reqNotSatCount = summ.requirements_not_satisfied_count || 0;
     }
 
     // Index
@@ -838,14 +860,7 @@ function renderTable(data) {
             : anyFailed
               ? (notSatCount === total ? "req-sat--red" : "req-sat--orange")
               : "req-sat--unknown";
-          let label;
-          if (allUnknown) {
-            label = `? ${total} requirements (unknown)`;
-          } else if (allSat) {
-            label = `\u2713 ${satCount}/${total} requirements`;
-          } else {
-            label = `${satCount}\u2713 ${notSatCount}\u2717 ${unkCount}? / ${total}`;
-          }
+          const label = allUnknown ? `?/${total} reqs` : `${satCount}/${total} reqs`;
 
           const satDiv = document.createElement("div");
           satDiv.className = `req-sat ${colorClass}`;
@@ -872,6 +887,11 @@ function renderTable(data) {
     const tdTrust = document.createElement("td");
     tdTrust.className = "col-trust";
     tdTrust.innerHTML = buildTrustBadges(row);
+    if (row.ranking_summary && row.ranking_summary.components && row.ranking_summary.components.length > 0) {
+      tdTrust.title = "Hover to see ranking breakdown";
+      tdTrust.addEventListener("mouseenter", (e) => showRankTooltip(e, row));
+      tdTrust.addEventListener("mouseleave", hideRankTooltip);
+    }
     tr.appendChild(tdTrust);
 
     tableBody.appendChild(tr);
@@ -881,6 +901,18 @@ function renderTable(data) {
 // ── Row trust badges ──────────────────────────────────────────────────────
 function buildTrustBadges(row) {
   const badges = [];
+  const ranking = row.ranking_summary || {};
+
+  if (ranking.rank_position) {
+    badges.push(
+      `<span class="badge badge--dim badge--rank">#${ranking.rank_position}</span>`,
+    );
+  }
+  if (ranking.final_score != null && ranking.final_score > 0) {
+    badges.push(
+      `<span class="badge badge--dim badge--rank">score ${Number(ranking.final_score).toFixed(2)}</span>`,
+    );
+  }
 
   // Sources count
   badges.push(
@@ -971,11 +1003,11 @@ function applyReqFilter(filter) {
       tr.style.display = "";
       return;
     }
-    const sat = parseFloat(tr.dataset.reqSat || "1");
     const satCount = parseInt(tr.dataset.reqSatCount || "0", 10);
+    const unkCount = parseInt(tr.dataset.reqUnknownCount || "0", 10);
 
     let visible = true;
-    if (filter === "all-req") visible = sat >= 0.999;
+    if (filter === "all-req") visible = satCount === reqTotal && unkCount === 0;
     else if (filter === "2plus") visible = satCount >= 2;
     else if (filter === "1plus") visible = satCount >= 1;
 
@@ -989,31 +1021,53 @@ function showReqTooltip(e, row) {
   const matches = summ.matches || [];
   if (matches.length === 0) return;
 
+  const groups = {
+    satisfied: matches.filter((m) => m.status === "satisfied"),
+    not_satisfied: matches.filter((m) => m.status === "not_satisfied"),
+    unknown: matches.filter((m) => m.status === "unknown"),
+  };
+
   let html = "";
-  for (const m of matches) {
-    const statusClass =
-      m.status === "satisfied"
-        ? "req-tooltip-sat"
-        : m.status === "not_satisfied"
-          ? "req-tooltip-unsat"
-          : "req-tooltip-unknown";
-    const icon =
-      m.status === "satisfied" ? "✓" : m.status === "not_satisfied" ? "✗" : "?";
-    let row_html = `<div class="${statusClass}"><strong>${icon} ${esc(m.label)}</strong>`;
-    if (m.reason) {
-      row_html += `<div class="req-tooltip-reason">${esc(m.reason)}</div>`;
+  for (const [status, items] of Object.entries(groups)) {
+    if (items.length === 0) continue;
+    const heading =
+      status === "satisfied"
+        ? "Satisfied"
+        : status === "not_satisfied"
+          ? "Not Satisfied"
+          : "Unknown";
+    html += `<div class="req-tooltip-group"><div class="req-tooltip-heading">${heading}</div>`;
+    for (const m of items) {
+      const statusClass =
+        m.status === "satisfied"
+          ? "req-tooltip-sat"
+          : m.status === "not_satisfied"
+            ? "req-tooltip-unsat"
+            : "req-tooltip-unknown";
+      const icon =
+        m.status === "satisfied" ? "✓" : m.status === "not_satisfied" ? "✗" : "?";
+      const evidence = m.evidence || {};
+      let rowHtml = `<div class="${statusClass}"><strong>${icon} ${esc(m.label)}</strong>`;
+      if (m.reason) {
+        rowHtml += `<div class="req-tooltip-reason">${esc(m.reason)}</div>`;
+      }
+      if (m.matched_value) {
+        rowHtml += `<div class="req-tooltip-matched">Value: ${esc(m.matched_value)}</div>`;
+      }
+      if (evidence.evidence_snippet) {
+        const snippet = evidence.evidence_snippet.length > 120
+          ? evidence.evidence_snippet.slice(0, 117) + "…"
+          : evidence.evidence_snippet;
+        rowHtml += `<div class="req-tooltip-evidence">${esc(snippet)}</div>`;
+      }
+      if (evidence.source_title || evidence.source_url) {
+        const sourceLabel = evidence.source_title || evidence.source_url;
+        rowHtml += `<div class="req-tooltip-source">${esc(sourceLabel)}</div>`;
+      }
+      rowHtml += `</div>`;
+      html += rowHtml;
     }
-    if (m.matched_value) {
-      row_html += `<div class="req-tooltip-matched">Value: ${esc(m.matched_value)}</div>`;
-    }
-    if (m.evidence_snippet) {
-      const snippet = m.evidence_snippet.length > 120
-        ? m.evidence_snippet.slice(0, 117) + "…"
-        : m.evidence_snippet;
-      row_html += `<div class="req-tooltip-evidence">${esc(snippet)}</div>`;
-    }
-    row_html += `</div>`;
-    html += row_html;
+    html += `</div>`;
   }
 
   reqTooltip.innerHTML = html;
@@ -1035,6 +1089,63 @@ function showReqTooltip(e, row) {
 
 function hideReqTooltip() {
   reqTooltip.classList.add("hidden");
+}
+
+function showRankTooltip(e, row) {
+  const ranking = row.ranking_summary || {};
+  const components = ranking.components || [];
+  if (components.length === 0) return;
+
+  const reqSummary = row.requirement_summary || {};
+  let html = `<div class="rank-tooltip-header">`;
+  html += `<div class="rank-tooltip-title">Rank #${ranking.rank_position || "?"}</div>`;
+  html += `<div class="rank-tooltip-score">Final score ${Number(ranking.final_score || 0).toFixed(3)}</div>`;
+  html += `</div>`;
+
+  html += `<div class="rank-tooltip-meta">Base ${Number(ranking.base_score || 0).toFixed(3)}`;
+  if ((ranking.hard_requirement_penalty || 0) > 0) {
+    html += ` • Hard-req penalty -${Number(ranking.hard_requirement_penalty).toFixed(3)}`;
+  }
+  html += `</div>`;
+
+  if ((reqSummary.requirements_total_count || 0) > 0) {
+    html += `<div class="rank-tooltip-meta">Requirements: ${reqSummary.requirements_satisfied_count || 0}/${reqSummary.requirements_total_count || 0} satisfied`;
+    if ((reqSummary.requirements_unknown_count || 0) > 0) {
+      html += ` • ${reqSummary.requirements_unknown_count} unknown`;
+    }
+    if ((reqSummary.requirements_not_satisfied_count || 0) > 0) {
+      html += ` • ${reqSummary.requirements_not_satisfied_count} failed`;
+    }
+    html += `</div>`;
+  }
+
+  html += `<div class="rank-tooltip-table">`;
+  for (const component of components) {
+    html += `<div class="rank-tooltip-row">`;
+    html += `<span class="rank-tooltip-label">${esc(component.label)}</span>`;
+    html += `<span class="rank-tooltip-value">${pct(component.value)} × ${pct(component.weight)} = +${Number(component.weighted_value || 0).toFixed(3)}</span>`;
+    html += `</div>`;
+  }
+  html += `</div>`;
+
+  rankTooltip.innerHTML = html;
+  rankTooltip.style.left = `${e.clientX + 14}px`;
+  rankTooltip.style.top = `${e.clientY + 14}px`;
+  rankTooltip.classList.remove("hidden");
+
+  requestAnimationFrame(() => {
+    const r = rankTooltip.getBoundingClientRect();
+    if (r.right > window.innerWidth - 8) {
+      rankTooltip.style.left = `${e.clientX - r.width - 14}px`;
+    }
+    if (r.bottom > window.innerHeight - 8) {
+      rankTooltip.style.top = `${e.clientY - r.height - 14}px`;
+    }
+  });
+}
+
+function hideRankTooltip() {
+  rankTooltip.classList.add("hidden");
 }
 
 // ── Modal ──────────────────────────────────────────────────────────────────

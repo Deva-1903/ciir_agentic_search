@@ -17,28 +17,41 @@ from __future__ import annotations
 import re
 
 from app.core.logging import get_logger
-from app.models.schema import EntityRow, RequirementMatch, RequirementSpec, RowRequirementsSummary
+from app.models.schema import (
+    EntityRow,
+    RequirementEvidence,
+    RequirementMatch,
+    RequirementSpec,
+    RowRequirementsSummary,
+)
 
 log = get_logger(__name__)
 
 # ── Money parsing ──────────────────────────────────────────────────────────────
 
-_MONEY_SUFFIXES = {"k": 1_000, "m": 1_000_000, "b": 1_000_000_000}
-_MONEY_RE = re.compile(r"\$?(\d+(?:\.\d+)?)\s*([kmb])?", re.IGNORECASE)
+_MONEY_SUFFIXES = {
+    "k": 1_000,
+    "thousand": 1_000,
+    "m": 1_000_000,
+    "million": 1_000_000,
+    "b": 1_000_000_000,
+    "billion": 1_000_000_000,
+}
+_MONEY_RE = re.compile(r"\$?(\d[\d,]*(?:\.\d+)?)\s*([kmb]|thousand|million|billion)?", re.IGNORECASE)
 
 
 def _parse_money(text: str) -> float | None:
     m = _MONEY_RE.search(text)
     if not m:
         return None
-    base = float(m.group(1))
+    base = float(m.group(1).replace(",", ""))
     suffix = (m.group(2) or "").lower()
     return base * _MONEY_SUFFIXES.get(suffix, 1)
 
 
 def _parse_number(text: str) -> float | None:
-    m = re.search(r"\d+(?:\.\d+)?", text)
-    return float(m.group(0)) if m else None
+    m = re.search(r"\d[\d,]*(?:\.\d+)?", text)
+    return float(m.group(0).replace(",", "")) if m else None
 
 
 # ── Location normalisation ─────────────────────────────────────────────────────
@@ -97,17 +110,18 @@ def _location_matches(cell_value: str, target: str) -> bool:
     Check whether *cell_value* (from a row cell) satisfies a location requirement
     with *target* (already normalised). Uses substring and normalisation.
     """
-    cell_norm = _normalize_location(cell_value)
-    # Direct normalised match
-    if cell_norm == target:
+    candidates = {_normalize_location(cell_value)}
+    for part in re.split(r"[,/|()\-]", cell_value):
+        cleaned = part.strip()
+        if cleaned:
+            candidates.add(_normalize_location(cleaned))
+
+    if target in candidates:
         return True
-    # If target is "us", also accept any US state
-    if target == "us" and (cell_norm.startswith("us-") or cell_norm == "us-state"):
+    if target == "us" and any(candidate.startswith("us-") or candidate == "us-state" for candidate in candidates):
         return True
-    # If target is "eu", accept any EU country
-    if target == "eu" and cell_norm == "eu":
+    if target == "eu" and "eu" in candidates:
         return True
-    # Raw substring match (case-insensitive) as fallback
     return target in cell_value.lower()
 
 
@@ -124,8 +138,10 @@ def _numeric_compare(cell_text: str, operator: str, threshold_text: str, money: 
         return cell_val > threshold
     if operator == "less_than":
         return cell_val < threshold
-    if operator in ("equals", "at_least"):
+    if operator == "at_least":
         return cell_val >= threshold
+    if operator == "equals":
+        return cell_val == threshold
     return None
 
 
@@ -155,6 +171,63 @@ def _candidate_cells(mapped_columns: list[str], row: EntityRow):
             yield col, cell
 
 
+def _normalize_text(text: str) -> str:
+    return re.sub(r"[\W_]+", " ", text.lower()).strip()
+
+
+def _match_confidence(cell_confidence: float, source_kind: str) -> float:
+    multiplier = {
+        "value": 1.0,
+        "evidence_snippet": 0.9,
+        "source_title": 0.8,
+    }.get(source_kind, 1.0)
+    return round(max(0.0, min(1.0, cell_confidence * multiplier)), 3)
+
+
+def _match_evidence(cell) -> RequirementEvidence | None:
+    if not cell:
+        return None
+    return RequirementEvidence(
+        source_url=cell.source_url,
+        source_title=cell.source_title,
+        evidence_snippet=cell.evidence_snippet,
+    )
+
+
+def _grounded_texts(cell, *, include_title: bool = True) -> list[tuple[str, str]]:
+    texts: list[tuple[str, str]] = []
+    if cell.value:
+        texts.append(("value", cell.value))
+    if cell.evidence_snippet and cell.evidence_snippet != cell.value:
+        texts.append(("evidence_snippet", cell.evidence_snippet))
+    if include_title and cell.source_title and cell.source_title not in {cell.value, cell.evidence_snippet}:
+        texts.append(("source_title", cell.source_title))
+    return texts
+
+
+def _make_match(
+    spec: RequirementSpec,
+    *,
+    status: str,
+    confidence: float,
+    matched_value: str | None = None,
+    matched_column: str | None = None,
+    reason: str | None = None,
+    cell=None,
+) -> RequirementMatch:
+    return RequirementMatch(
+        requirement_id=spec.id,
+        label=spec.label,
+        status=status,
+        confidence=confidence,
+        matched_value=matched_value,
+        matched_column=matched_column,
+        reason=reason,
+        evidence=_match_evidence(cell),
+        is_hard=spec.is_hard,
+    )
+
+
 # ── Core evaluator ─────────────────────────────────────────────────────────────
 
 
@@ -177,13 +250,11 @@ def evaluate_requirement(spec: RequirementSpec, row: EntityRow) -> RequirementMa
 
     # No relevant field present → unknown
     if not candidate_cells:
-        return RequirementMatch(
-            requirement_id=spec.id,
-            label=spec.label,
+        return _make_match(
+            spec,
             status="unknown",
             confidence=0.0,
             reason="No relevant field found in row",
-            is_hard=spec.is_hard,
         )
 
     operator = spec.operator
@@ -192,128 +263,123 @@ def evaluate_requirement(spec: RequirementSpec, row: EntityRow) -> RequirementMa
     # ── exists ────────────────────────────────────────────────────────────────
     if operator == "exists":
         col_name, cell = candidate_cells[0]
-        return RequirementMatch(
-            requirement_id=spec.id,
-            label=spec.label,
+        return _make_match(
+            spec,
             status="satisfied",
             confidence=cell.confidence,
             matched_value=cell.value,
             matched_column=col_name,
             reason=f"Field '{col_name}' is present",
-            evidence_snippet=cell.evidence_snippet,
-            evidence_source_url=cell.source_url,
-            is_hard=spec.is_hard,
+            cell=cell,
         )
 
     # ── location ──────────────────────────────────────────────────────────────
     if spec.kind == "location":
         norm_target = _normalize_location(target)
         for col_name, cell in candidate_cells:
-            if _location_matches(cell.value, norm_target):
-                return RequirementMatch(
-                    requirement_id=spec.id,
-                    label=spec.label,
+            for source_kind, text in _grounded_texts(cell):
+                if not _location_matches(text, norm_target):
+                    continue
+                return _make_match(
+                    spec,
                     status="satisfied",
-                    confidence=cell.confidence,
-                    matched_value=cell.value,
+                    confidence=_match_confidence(cell.confidence, source_kind),
+                    matched_value=text,
                     matched_column=col_name,
-                    reason=f"'{cell.value}' matches location '{spec.target_value_raw or target}'",
-                    evidence_snippet=cell.evidence_snippet,
-                    evidence_source_url=cell.source_url,
-                    is_hard=spec.is_hard,
+                    reason=f"Location evidence matches '{spec.target_value_raw or target}'",
+                    cell=cell,
                 )
         # Fields present but no match
         first_col, first_cell = candidate_cells[0]
-        return RequirementMatch(
-            requirement_id=spec.id,
-            label=spec.label,
+        return _make_match(
+            spec,
             status="not_satisfied",
             confidence=first_cell.confidence,
             matched_value=first_cell.value,
             matched_column=first_col,
             reason=f"'{first_cell.value}' does not match location '{spec.target_value_raw or target}'",
-            evidence_snippet=first_cell.evidence_snippet,
-            evidence_source_url=first_cell.source_url,
-            is_hard=spec.is_hard,
+            cell=first_cell,
         )
 
     # ── numeric ───────────────────────────────────────────────────────────────
     if spec.kind == "numeric":
-        is_money = any(k in (spec.id or "") for k in ("fund", "val", "rais"))
+        hint_text = f"{spec.id} {spec.label} {spec.source_phrase} {spec.target_value or ''}".lower()
+        is_money = any(token in hint_text for token in ("fund", "rais", "valuation", "capital", "$"))
+        satisfied_match: RequirementMatch | None = None
+        failed_match: RequirementMatch | None = None
         for col_name, cell in candidate_cells:
-            result = _numeric_compare(cell.value, operator, target, money=is_money)
-            if result is None:
-                continue  # unparseable cell — try next
-            status = "satisfied" if result else "not_satisfied"
-            reason = (
-                f"'{cell.value}' {'satisfies' if result else 'does not satisfy'} "
-                f"requirement {operator.replace('_',' ')} {spec.target_value_raw or target}"
-            )
-            return RequirementMatch(
-                requirement_id=spec.id,
-                label=spec.label,
-                status=status,
-                confidence=cell.confidence,
-                matched_value=cell.value,
-                matched_column=col_name,
-                reason=reason,
-                evidence_snippet=cell.evidence_snippet,
-                evidence_source_url=cell.source_url,
-                is_hard=spec.is_hard,
-            )
+            for source_kind, text in _grounded_texts(cell, include_title=False):
+                result = _numeric_compare(text, operator, target, money=is_money)
+                if result is None:
+                    continue
+                status = "satisfied" if result else "not_satisfied"
+                reason = (
+                    f"'{text}' {'satisfies' if result else 'does not satisfy'} "
+                    f"requirement {operator.replace('_', ' ')} {spec.target_value_raw or target}"
+                )
+                match = _make_match(
+                    spec,
+                    status=status,
+                    confidence=_match_confidence(cell.confidence, source_kind),
+                    matched_value=text,
+                    matched_column=col_name,
+                    reason=reason,
+                    cell=cell,
+                )
+                if result:
+                    if satisfied_match is None or match.confidence > satisfied_match.confidence:
+                        satisfied_match = match
+                elif failed_match is None or match.confidence > failed_match.confidence:
+                    failed_match = match
+        if satisfied_match:
+            return satisfied_match
+        if failed_match:
+            return failed_match
         # No cell yielded a parseable number
         first_col, first_cell = candidate_cells[0]
-        return RequirementMatch(
-            requirement_id=spec.id,
-            label=spec.label,
+        return _make_match(
+            spec,
             status="unknown",
             confidence=0.0,
             matched_value=first_cell.value,
             matched_column=first_col,
             reason=f"Could not parse numeric value from '{first_cell.value}'",
-            evidence_snippet=first_cell.evidence_snippet,
-            evidence_source_url=first_cell.source_url,
-            is_hard=spec.is_hard,
+            cell=first_cell,
         )
 
     # ── categorical / semantic / default ─────────────────────────────────────
+    target_norm = _normalize_text(target)
     for col_name, cell in candidate_cells:
-        cell_lower = cell.value.lower()
-        target_lower = target.lower()
-        if operator in ("equals",):
-            matched = cell_lower == target_lower or target_lower in cell_lower
-        elif operator in ("contains", "matches_topic"):
-            matched = target_lower in cell_lower
-        else:
-            matched = target_lower in cell_lower  # fallback to substring
+        for source_kind, text in _grounded_texts(cell):
+            text_norm = _normalize_text(text)
+            if operator == "equals":
+                matched = text_norm == target_norm or target_norm in text_norm
+            elif operator in ("contains", "matches_topic"):
+                matched = target_norm in text_norm
+            else:
+                matched = target_norm in text_norm
 
-        if matched:
-            return RequirementMatch(
-                requirement_id=spec.id,
-                label=spec.label,
-                status="satisfied",
-                confidence=cell.confidence,
-                matched_value=cell.value,
-                matched_column=col_name,
-                reason=f"'{cell.value}' contains '{spec.target_value_raw or target}'",
-                evidence_snippet=cell.evidence_snippet,
-                evidence_source_url=cell.source_url,
-                is_hard=spec.is_hard,
-            )
+            if matched:
+                return _make_match(
+                    spec,
+                    status="satisfied",
+                    confidence=_match_confidence(cell.confidence, source_kind),
+                    matched_value=text,
+                    matched_column=col_name,
+                    reason=f"Matched '{spec.target_value_raw or target}' in {col_name.replace('_', ' ')}",
+                    cell=cell,
+                )
 
     # Fields present but no string match
     first_col, first_cell = candidate_cells[0]
-    return RequirementMatch(
-        requirement_id=spec.id,
-        label=spec.label,
+    return _make_match(
+        spec,
         status="not_satisfied",
         confidence=first_cell.confidence,
         matched_value=first_cell.value,
         matched_column=first_col,
-        reason=f"'{first_cell.value}' does not contain '{spec.target_value_raw or target}'",
-        evidence_snippet=first_cell.evidence_snippet,
-        evidence_source_url=first_cell.source_url,
-        is_hard=spec.is_hard,
+        reason=f"'{first_cell.value}' does not match '{spec.target_value_raw or target}'",
+        cell=first_cell,
     )
 
 
@@ -336,6 +402,13 @@ def build_requirement_summary(
 
     for spec in specs:
         match = evaluate_requirement(spec, row)
+        per_requirement = 1.0 / len(specs)
+        if match.status == "satisfied":
+            match.score_contribution = round(per_requirement, 3)
+        elif match.status == "unknown":
+            match.score_contribution = round(per_requirement * 0.5, 3)
+        else:
+            match.score_contribution = 0.0
         matches.append(match)
         if match.status == "satisfied":
             sat += 1
@@ -346,8 +419,7 @@ def build_requirement_summary(
         else:
             unk += 1
 
-    denominator = sat + not_sat
-    satisfaction_ratio = (sat / denominator) if denominator > 0 else 1.0
+    satisfaction_ratio = (sat / len(specs)) if specs else 0.0
 
     return RowRequirementsSummary(
         requirements_total_count=len(specs),
@@ -377,9 +449,17 @@ def attach_requirement_summaries(
     for row in rows:
         row.requirement_summary = build_requirement_summary(specs, row)
 
-    log.debug(
-        "Requirement summaries attached: %d rows, %d specs",
+    total_matches = sum(len(row.requirement_summary.matches) for row in rows)
+    sat = sum(row.requirement_summary.requirements_satisfied_count for row in rows)
+    not_sat = sum(row.requirement_summary.requirements_not_satisfied_count for row in rows)
+    unk = sum(row.requirement_summary.requirements_unknown_count for row in rows)
+    log.info(
+        "Requirement summaries attached: %d rows, %d specs, matches=%d (sat=%d not_sat=%d unknown=%d)",
         len(rows),
         len(specs),
+        total_matches,
+        sat,
+        not_sat,
+        unk,
     )
     return rows

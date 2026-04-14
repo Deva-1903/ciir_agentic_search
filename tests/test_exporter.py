@@ -5,7 +5,16 @@ import io
 import json
 import pytest
 
-from app.models.schema import Cell, EntityRow, SearchMetadata, SearchResponse
+from app.models.schema import (
+    Cell,
+    EntityRow,
+    RequirementEvidence,
+    RequirementMatch,
+    RequirementSpec,
+    RowRequirementsSummary,
+    SearchMetadata,
+    SearchResponse,
+)
 from app.services.exporter import to_csv, to_json
 
 
@@ -49,6 +58,51 @@ def _make_response() -> SearchResponse:
     )
 
 
+def _make_requirement_response() -> SearchResponse:
+    response = _make_response()
+    response.metadata.requirements = [
+        RequirementSpec(
+            id="loc_0",
+            label="Location: US",
+            kind="location",
+            operator="contains",
+            target_value="us",
+            target_value_raw="US",
+            source_phrase="in the US",
+            mapped_columns=["headquarters"],
+            is_hard=True,
+        )
+    ]
+    response.metadata.requirements_parsed = 1
+    response.rows[0].requirement_summary = RowRequirementsSummary(
+        requirements_total_count=1,
+        requirements_satisfied_count=1,
+        requirements_not_satisfied_count=0,
+        requirements_unknown_count=0,
+        satisfaction_ratio=1.0,
+        hard_requirements_satisfied_count=1,
+        matches=[
+            RequirementMatch(
+                requirement_id="loc_0",
+                label="Location: US",
+                status="satisfied",
+                confidence=0.95,
+                matched_value="United States",
+                matched_column="headquarters",
+                reason="Location evidence matches 'US'",
+                evidence=RequirementEvidence(
+                    source_url="https://techcrunch.com/stripe",
+                    source_title="TechCrunch",
+                    evidence_snippet="Stripe is a payments company in the United States",
+                ),
+                score_contribution=1.0,
+                is_hard=True,
+            )
+        ],
+    )
+    return response
+
+
 class TestToJson:
     def test_valid_json(self):
         response = _make_response()
@@ -65,6 +119,14 @@ class TestToJson:
         assert row["cells"]["name"]["value"] == "Stripe"
         assert "evidence_snippet" in row["cells"]["name"]
         assert "source_url" in row["cells"]["name"]
+
+    def test_contains_requirements_and_row_summary(self):
+        parsed = json.loads(to_json(_make_requirement_response()))
+
+        assert parsed["metadata"]["requirements"][0]["label"] == "Location: US"
+        match = parsed["rows"][0]["requirement_summary"]["matches"][0]
+        assert match["status"] == "satisfied"
+        assert match["evidence"]["source_title"] == "TechCrunch"
 
 
 class TestToCsv:
@@ -105,3 +167,18 @@ class TestToCsv:
         response = _make_response()
         rows = self._parse_csv(to_csv(response))
         assert float(rows[0]["name_confidence"]) == pytest.approx(0.95)
+
+    def test_requirement_columns_are_added_when_present(self):
+        content = to_csv(_make_requirement_response())
+        header = content.split("\n")[0]
+
+        assert "requirements_satisfied_count" in header
+        assert "requirements_total_count" in header
+        assert "requirements_summary" in header
+
+    def test_requirement_summary_is_flattened(self):
+        rows = self._parse_csv(to_csv(_make_requirement_response()))
+
+        assert rows[0]["requirements_satisfied_count"] == "1"
+        assert rows[0]["requirements_total_count"] == "1"
+        assert rows[0]["requirements_summary"] == "Location: US:satisfied"

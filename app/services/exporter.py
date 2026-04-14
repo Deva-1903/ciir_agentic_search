@@ -35,7 +35,11 @@ def to_csv(response: SearchResponse) -> str:
         header.append(f"{col}_confidence")
     header += ["sources_count", "aggregate_confidence"]
     if has_requirements:
-        header += ["requirements_satisfied", "requirements_total", "requirements_summary"]
+        header += [
+            "requirements_satisfied_count",
+            "requirements_total_count",
+            "requirements_summary",
+        ]
 
     output = io.StringIO()
     writer = csv.writer(output, lineterminator="\n")

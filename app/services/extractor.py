@@ -23,6 +23,7 @@ from app.models.schema import (
     EntityDraft,
     ExtractionResult,
     PlannerOutput,
+    RequirementSpec,
     ScrapedPage,
 )
 from app.services.deterministic_extractors import extract_deterministic_entities
@@ -181,20 +182,31 @@ def _extractor_provider_order(settings) -> list[str]:
     return order or [primary]
 
 
-def build_candidate_discovery_plan(plan: PlannerOutput) -> PlannerOutput:
+def build_candidate_discovery_plan(
+    plan: PlannerOutput,
+    requirements: list[RequirementSpec] | None = None,
+) -> PlannerOutput:
     """Return a lighter-weight schema used for candidate discovery.
 
     Discovery-first extraction is recall-oriented: it tries to surface every
     plausible entity with a name and a couple of lightweight anchoring fields.
-    We take the first 4 schema columns (name plus the three most fundamental
-    fields from the plan template) rather than favouring any vertical's
-    column names.
+    We take up to 4 schema columns total. When the query carries explicit
+    requirements, we prioritize the requirement-mapped columns so discovery can
+    surface evidence for those constraints early without widening the schema.
     """
     if not plan.columns:
         columns = ["name"]
     else:
-        # `name` is always first in the schema; keep up to 4 columns total.
-        columns = list(plan.columns[:4])
+        priority_cols = ["name"]
+        if requirements:
+            for spec in requirements:
+                for col in spec.mapped_columns:
+                    if col in plan.columns and col not in priority_cols:
+                        priority_cols.append(col)
+        for col in plan.columns:
+            if col not in priority_cols:
+                priority_cols.append(col)
+        columns = priority_cols[:4]
         if "name" not in columns:
             columns = ["name"] + [c for c in columns if c != "name"]
 

@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
-from app.models.schema import EntityRow, PlannerOutput
+from app.models.schema import EntityRow, PlannerOutput, RankingSignal, RowRankingSummary
 from app.services.source_quality import (
     row_evidence_regime_profile,
     row_source_profile,
@@ -43,6 +43,22 @@ _WEIGHTS = {
     "official_fit": 0.04,
     "structured_fit": 0.02,
     "requirement_satisfaction": 0.15,
+}
+
+_COMPONENT_LABELS = {
+    "completeness": "Schema coverage",
+    "field_importance": "Important fields filled",
+    "avg_confidence": "Cell confidence",
+    "source_support": "Source support",
+    "actionable": "Actionable detail",
+    "source_quality": "Evidence quality",
+    "source_diversity": "Source diversity",
+    "local_fit": "Location fit",
+    "freshness": "Freshness",
+    "reputation": "Reputation",
+    "official_fit": "Official-site fit",
+    "structured_fit": "Structured-source fit",
+    "requirement_satisfaction": "Requirement match",
 }
 
 _WEAK_SIGNAL_COLS = {
@@ -350,6 +366,31 @@ def _score(row: EntityRow, plan: PlannerOutput, query: str | None = None) -> flo
     return round(base - penalty, 4)
 
 
+def ranking_summary(row: EntityRow, plan: PlannerOutput, query: str | None = None) -> RowRankingSummary:
+    """Return a typed explanation of how the ranker scored this row."""
+    breakdown = score_breakdown(row, plan, query)
+    weights = _get_weights()
+    components = [
+        RankingSignal(
+            key=key,
+            label=_COMPONENT_LABELS.get(key, key.replace("_", " ").title()),
+            value=round(breakdown[key], 3),
+            weight=round(weights[key], 3),
+            weighted_value=round(weights[key] * breakdown[key], 4),
+        )
+        for key in weights
+    ]
+    components.sort(key=lambda component: component.weighted_value, reverse=True)
+    base = round(sum(component.weighted_value for component in components), 4)
+    penalty = round(_hard_requirement_penalty(row), 4)
+    return RowRankingSummary(
+        base_score=base,
+        final_score=round(base - penalty, 4),
+        hard_requirement_penalty=penalty,
+        components=components,
+    )
+
+
 def is_row_viable(row: EntityRow, plan: PlannerOutput) -> bool:
     if "name" not in row.cells:
         return False
@@ -398,8 +439,13 @@ def rank_rows(
     plan: PlannerOutput,
     query: str | None = None,
 ) -> list[EntityRow]:
-    scored = [(row, _score(row, plan, query=query)) for row in rows]
+    scored: list[tuple[EntityRow, float]] = []
+    for row in rows:
+        row.ranking_summary = ranking_summary(row, plan, query=query)
+        scored.append((row, row.ranking_summary.final_score))
     scored.sort(key=lambda item: item[1], reverse=True)
+    for idx, (row, _) in enumerate(scored, start=1):
+        row.ranking_summary.rank_position = idx
     result = [row for row, _ in scored]
     log.info("Ranked %d rows", len(result))
     return result
