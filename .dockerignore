@@ -1,0 +1,24 @@
+# Keep the Cloud Build upload small and never ship secrets.
+.git
+.gitignore
+.venv
+venv
+__pycache__
+**/__pycache__
+*.pyc
+.pytest_cache
+*.egg-info
+agentic_search.egg-info
+.env
+.env.*
+!.env.example
+data/
+tests/
+docs/
+scripts/
+BUILD_JOURNAL.md
+.claude
+app.yaml
+README.md
+DEPLOY_CLOUDRUN.md
+deploy/
